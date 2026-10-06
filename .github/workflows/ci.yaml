@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install pinned ShellCheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl -fsSLo "$archive" "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          echo "$SHELLCHECK_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/bin" --strip-components=1 "shellcheck-$SHELLCHECK_VERSION/shellcheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh
+
+  test:
+    name: test (linux/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Setup Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v4.3.0
+
+      # ORAS matches the pinned ORAS image, kind the pinned kindest/node image
+      # (scripts/images.sh) and kubectl that node's Kubernetes version.
+      - name: Install pinned ORAS, kind and kubectl
+        env:
+          ARCH: ${{ matrix.arch }}
+          ORAS_VERSION: 1.3.4
+          KIND_VERSION: v0.33.0
+          KUBECTL_VERSION: v1.36.4
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            amd64)
+              oras_sha256=f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454
+              kind_sha256=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+              kubectl_sha256=8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a
+              ;;
+            arm64)
+              oras_sha256=15702c6e3a4a56a8bd8ac5c17efdbcab56d9bada661ccbcf017f5b10c1d89399
+              kind_sha256=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
+              kubectl_sha256=0ecf44450ee6063bf19dd166a103ee6df4a9034455c2abce626e6eea657d73fb
+              ;;
+            *) echo "::error::Unsupported architecture $ARCH"; exit 1 ;;
+          esac
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          curl -fsSLo "$RUNNER_TEMP/oras.tar.gz" "https://github.com/oras-project/oras/releases/download/v$ORAS_VERSION/oras_${ORAS_VERSION}_linux_$ARCH.tar.gz"
+          curl -fsSLo "$bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-$ARCH"
+          curl -fsSLo "$bin/kubectl" "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$ARCH/kubectl"
+          sha256sum --check --strict <<EOF
+          $oras_sha256  $RUNNER_TEMP/oras.tar.gz
+          $kind_sha256  $bin/kind
+          $kubectl_sha256  $bin/kubectl
+          EOF
+          tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$bin" oras
+          chmod +x "$bin/kind" "$bin/kubectl"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Check gofmt, race tests, vet, chart and package contracts
+        run: ./scripts/check.sh
+
+      # check.sh runs the suite natively on Linux; this adds the sealed scratch
+      # container run with a read-only root and a noexec /tmp.
+      - name: Run the runtime tests in a sealed Linux container
+        run: ./scripts/linux-test.sh
+
+      - name: Run the runtime and UI under Docker Compose
+        run: ./scripts/compose-test.sh
+
+      - name: Test the package init chain
+        run: ./scripts/package-init-chain-test.sh
+
+      - name: Install, upgrade, restart and roll back on kind
+        run: ./scripts/kind-test.sh

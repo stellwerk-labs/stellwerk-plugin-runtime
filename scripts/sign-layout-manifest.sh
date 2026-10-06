@@ -13,13 +13,17 @@ package_dir="$(cd "$package_output" && pwd)"
 key_dir="$(cd "$(dirname "$private_key")" && pwd)"
 require_image "$cosign_image" "$(docker_platform)"
 
-# Authenticate the exact exported OCI manifest without registry or transparency
-# uploads. The chart consumes this detached bundle and fetches the same manifest
-# by digest; publication must preserve that digest.
+# managed-key-no-tlog: authenticate the exact exported OCI manifest with the
+# publisher's managed key and no transparency log, timestamp authority or
+# registry upload. The signing config lists no services, which is Cosign's
+# current mechanism (--tlog-upload=false is deprecated). The chart consumes
+# this detached bundle and fetches the same manifest by digest; publication
+# must preserve that digest.
 offline_cosign \
   --mount "type=bind,src=$key_dir,dst=/key,readonly" \
   --mount "type=bind,src=$package_dir,dst=/package" \
-  -- sign-blob --yes --use-signing-config=false --tlog-upload=false \
+  --mount "type=bind,src=$root/scripts/signing-config-no-tlog.json,dst=/config/signing-config.json,readonly" \
+  -- sign-blob --yes --signing-config=/config/signing-config.json \
   --key "/key/$(basename "$private_key")" \
   --bundle /package/oci-manifest.sigstore.json /package/oci-manifest.json >/dev/null
 echo "$package_dir/oci-manifest.sigstore.json"

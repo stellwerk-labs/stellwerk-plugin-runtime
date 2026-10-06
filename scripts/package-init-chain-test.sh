@@ -91,11 +91,41 @@ plugin_version="$(jq -er '.pluginVersion' "$release")"
 test "sha256:$(shasum -a 256 "$workspace/transfer/oci-manifest.json" | awk '{print $1}')" = "$digest"
 
 mkdir -m 0777 "$workspace/package" "$workspace/tampered" "$workspace/wrong-key"
-mkdir -m 0755 "$workspace/trust" "$workspace/signature"
-cp "$workspace/approved/cosign.pub" "$workspace/trust/cosign.pub"
+mkdir -m 0755 "$workspace/trust" "$workspace/trust-sigstore" "$workspace/trust-wrong" "$workspace/signature"
+mkdir -m 0777 "$workspace/verify" "$workspace/verify-refused"
+# Operator trust bootstraps: the approved key under managed-key-no-tlog, the
+# same key under the default sigstore policy, and a foreign key.
+bootstrap() {
+  python3 - "$@" <<'PY'
+import base64, datetime, hashlib, json, sys
+output, policy, public_key, plugin_id = sys.argv[1:]
+pem = open(public_key, encoding="ascii").read()
+body = "".join(line for line in pem.splitlines() if not line.startswith("-----"))
+now = datetime.datetime.now(datetime.timezone.utc)
+stamp = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+key = {"keyId": base64.b64encode(hashlib.sha256(base64.b64decode(body)).digest()).decode(),
+       "algorithm": "ecdsa-p256-sha256", "publicKey": pem,
+       "validFrom": stamp(now - datetime.timedelta(days=1)), "validUntil": stamp(now + datetime.timedelta(days=1))}
+with open(output, "w", encoding="utf-8") as file:
+    json.dump({"schemaVersion": 1, "publishers": [{"id": "stellwerk", "policy": policy, "pluginIds": [plugin_id], "keys": [key]}]}, file)
+PY
+}
+bootstrap "$workspace/trust/publishers.json" managed-key-no-tlog "$workspace/approved/cosign.pub" "$plugin_id"
+bootstrap "$workspace/trust-sigstore/publishers.json" sigstore "$workspace/approved/cosign.pub" "$plugin_id"
+bootstrap "$workspace/trust-wrong/publishers.json" managed-key-no-tlog "$workspace/wrong/cosign.pub" "$plugin_id"
 cp "$workspace/wrong/cosign.pub" "$workspace/trust/wrong.pub"
 cp "$workspace/transfer/oci-manifest.sigstore.json" "$workspace/signature/oci-manifest.sigstore.json"
-chmod 0444 "$workspace/trust/"*.pub "$workspace/signature/oci-manifest.sigstore.json"
+chmod 0444 "$workspace/trust/"* "$workspace/trust-sigstore/"* "$workspace/trust-wrong/"* "$workspace/signature/oci-manifest.sigstore.json"
+publisher_gate() {
+  local trust="$1" verify="$2"
+  timeout -k 5s 30s docker run "${container_base[@]}" --network none \
+    --mount "type=bind,src=$workspace/package,dst=/package,readonly" \
+    --mount "type=bind,src=$workspace/$trust,dst=/trust,readonly" \
+    --mount "type=bind,src=$workspace/signature,dst=/signature,readonly" \
+    --mount "type=bind,src=$workspace/$verify,dst=/verify" "$runtime_image" \
+    verify-publisher --trust-bootstrap=/trust/publishers.json --bundle=/signature/oci-manifest.sigstore.json \
+    --oci-manifest=/package/oci-manifest.json --plugin-id="$plugin_id" --key-out=/verify/publisher.pub
+}
 
 timeout -k 5s 30s docker run --detach --pull=never --name "$registry" \
   --publish 127.0.0.1::5000 "$registry_image" >/dev/null
@@ -130,11 +160,27 @@ timeout -k 5s 30s docker run "${container_base[@]}" --network none \
   --mount "type=bind,src=$workspace/package,dst=/package,readonly" "$runtime_image" \
   verify-envelope --oci-manifest=/package/oci-manifest.json \
   --package-digest="$digest" --manifest-sha256="$manifest_hash" >/dev/null
+# managed-key-no-tlog: the runtime gate checks the bootstrap policy and the
+# signature offline and hands only the pinned key to Cosign, which verifies
+# the same bytes again. The same signature fails for a publisher pinned with
+# the default sigstore policy and for a bootstrap pinning another key.
+publisher_gate trust verify >/dev/null
+for refused in "trust-sigstore:requires transparency-log verification" "trust-wrong:does not pin"; do
+  if output="$(publisher_gate "${refused%%:*}" verify-refused 2>&1)"; then
+    echo "the publisher gate accepted ${refused%%:*}" >&2
+    exit 1
+  fi
+  if [[ "$output" != *"${refused#*:}"* ]]; then
+    echo "the publisher gate refused ${refused%%:*} for the wrong reason: $output" >&2
+    exit 1
+  fi
+done
+test ! -e "$workspace/verify-refused/publisher.pub"
 quiet timeout -k 5s 45s docker run "${container_base[@]}" --network none \
   --mount "type=bind,src=$workspace/package,dst=/package,readonly" \
-  --mount "type=bind,src=$workspace/trust,dst=/trust,readonly" \
+  --mount "type=bind,src=$workspace/verify,dst=/verify,readonly" \
   --mount "type=bind,src=$workspace/signature,dst=/signature,readonly" "$cosign_image" \
-  verify-blob --insecure-ignore-tlog --key=/trust/cosign.pub \
+  verify-blob --insecure-ignore-tlog --key=/verify/publisher.pub \
   --bundle=/signature/oci-manifest.sigstore.json /package/oci-manifest.json
 timeout -k 5s 60s docker run "${container_base[@]}" --network "container:$registry" \
   --mount "type=bind,src=$workspace/package,dst=/package" "$oras_image" \
@@ -238,4 +284,4 @@ for case_name in tampered wrong-key; do
   fi
 done
 
-echo "Signed package init chain passed: $digest ($platform); offline bundle verified, verified package ran, tampered manifest/blob, archive layer and wrong key fail closed."
+echo "Signed package init chain passed: $digest ($platform); managed-key-no-tlog gate and Cosign verified offline, verified package ran; default-policy publisher, foreign key, tampered manifest/blob, archive layer and wrong key fail closed."

@@ -4,6 +4,8 @@
 oras_image=ghcr.io/oras-project/oras@sha256:f7bc056d54d97baa399414ed5048ecc67c3371b750d4bbce1d871827a5758179     # v1.3.4
 cosign_image=ghcr.io/sigstore/cosign/cosign@sha256:9e5c2f2edc34351160407ca3416c61855bdf9403c3c5936e0f0be7fc261611b8 # v3.1.3
 registry_image=registry@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8                     # 3.1.2
+# kind node image for kind v0.33. KIND_NODE_IMAGE overrides it for other kind versions.
+kind_node_image=kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed # Kubernetes v1.36.4
 
 # docker_platform prints the daemon platform as linux/amd64 or linux/arm64.
 docker_platform() {

@@ -19,7 +19,22 @@ runtime_reference=""
 oras_reference=""
 checks=()
 
+# On failure, show what the test namespace looked like before the cluster
+# goes away. Every call is time-boxed and its output bounded.
+diagnostics() {
+  echo "kind test failed; diagnostics for namespace $namespace:" >&2
+  local step
+  for step in "get pods -o wide" "describe pods" "get events --sort-by=.lastTimestamp" \
+    "logs --all-containers --prefix --tail=200 -l app.kubernetes.io/instance=$release"; do
+    echo "--- kubectl $step" >&2
+    # shellcheck disable=SC2086 # each step is a fixed kubectl argument list
+    timeout -k 5s 30s kubectl --kubeconfig "$kubeconfig" --context "$context" --namespace "$namespace" $step 2>&1 | head -n 300 >&2 || true
+  done
+}
+
 cleanup() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ -s "$kubeconfig" ]; then diagnostics; fi
   if [ -n "$port_forward_pid" ]; then kill "$port_forward_pid" >/dev/null 2>&1 || true; fi
   kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
   docker rm -f "$registry" >/dev/null 2>&1 || true
@@ -51,7 +66,8 @@ printf '%s\n' \
   '  [plugins."io.containerd.grpc.v1.cri".registry]' \
   '    config_path = "/etc/containerd/certs.d"' \
   >"$workspace/kind.yaml"
-kind create cluster --name "$cluster" --kubeconfig "$kubeconfig" --config "$workspace/kind.yaml"
+kind create cluster --name "$cluster" --kubeconfig "$kubeconfig" --config "$workspace/kind.yaml" \
+  --image "${KIND_NODE_IMAGE:-$kind_node_image}"
 
 for node in $(kind get nodes --name "$cluster"); do
   registry_directory="/etc/containerd/certs.d/localhost:$registry_port"
@@ -149,6 +165,40 @@ wait "$port_forward_pid" 2>/dev/null || true
 port_forward_pid=""
 checks+=("non-root runtime and persistent probe state")
 
+# Sealed execution in a real node: the probe process runs from the memfd.
+node="$(kind get nodes --name "$cluster" | head -n 1)"
+memfd_noexec="$(docker exec "$node" cat /proc/sys/vm/memfd_noexec)"
+plugin_executable="$(docker exec "$node" sh -c 'for process in /proc/[0-9]*; do readlink "$process/exe"; done 2>/dev/null' |
+  grep -m 1 -F '/memfd:stellwerk-plugin' || true)"
+if [ -z "$plugin_executable" ]; then
+  echo "no plugin process runs from the sealed memfd on $node" >&2
+  exit 1
+fi
+checks+=("plugin runs from the sealed memfd (vm.memfd_noexec=$memfd_noexec)")
+
+# NetworkPolicy enforcement: the same client is refused from an arbitrary
+# namespace and admitted as the configured control plane peer.
+netcheck() {
+  local name="$1" client_namespace="$2" labels="$3" phase
+  kube --namespace "$client_namespace" run "$name" --image="$registry_image" --restart=Never --labels="$labels" \
+    --command -- sh -c "wget -q -T 5 -O /dev/null http://native-probe-native-plugin-runtime.$namespace:8080/health" >/dev/null
+  for _ in {1..60}; do
+    phase="$(kube --namespace "$client_namespace" get pod "$name" -o jsonpath='{.status.phase}')"
+    case "$phase" in Succeeded | Failed) break ;; esac
+    sleep 1
+  done
+  echo "$phase"
+}
+kube create namespace platform-orchestrator >/dev/null
+denied="$(netcheck netcheck-other "$namespace" app=netcheck)"
+admitted="$(netcheck netcheck-core platform-orchestrator \
+  app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=platform-orchestrator)"
+if [ "$denied" != Failed ] || [ "$admitted" != Succeeded ]; then
+  echo "NetworkPolicy not enforced as specified: other=$denied, control plane=$admitted" >&2
+  exit 1
+fi
+checks+=("NetworkPolicy enforced: arbitrary client refused, control plane peer admitted")
+
 helm_apply 1.1.0 "$digest_v2" "$manifest_v2"
 kube --namespace "$namespace" rollout status deployment/native-probe-native-plugin-runtime --timeout=90s >/dev/null
 runtime_after="$(kube --namespace "$namespace" get pod -l app.kubernetes.io/instance="$release" -o jsonpath='{.items[0].spec.containers[0].image}')"
@@ -185,9 +235,11 @@ checks+=("state retained across upgrade, restart and rollback")
 jq -n \
   --arg status passed \
   --arg cluster "$cluster" \
+  --arg memfdNoexec "$memfd_noexec" \
+  --arg pluginExecutable "$plugin_executable" \
   --arg runtimeImage "$runtime_before" \
   --arg trustState untrusted-development \
   --argjson checks "$(printf '%s\n' "${checks[@]}" | jq -R . | jq -s .)" \
-  '{status:$status,scope:"disposable local kind cluster; probe smoke plugin only",cluster:$cluster,runtimeImage:$runtimeImage,trustState:$trustState,checks:$checks}'
+  '{status:$status,scope:"disposable local kind cluster; probe smoke plugin only",cluster:$cluster,memfdNoexec:$memfdNoexec,pluginExecutable:$pluginExecutable,runtimeImage:$runtimeImage,trustState:$trustState,checks:$checks}'
 
 echo "Kind native runtime lifecycle passed (explicitly untrusted development profile)."

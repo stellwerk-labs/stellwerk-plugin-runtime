@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -131,14 +132,17 @@ func TestManagedKeyPackageVerifiesOffline(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	for name, data := range map[string][]byte{"bundle.json": bundle, "oci-manifest.json": []byte(signedManifest)} {
+	for name, data := range map[string][]byte{"bundle.json": bundle, "oci-manifest.json": []byte(signedManifest),
+		"sbom.json":       signer.attest(t, []byte(signedManifest), sbomPredicateType, fixtureSBOM),
+		"provenance.json": signer.attest(t, []byte(signedManifest), provenancePredicateType, fixtureProvenance)} {
 		if err := os.WriteFile(filepath.Join(directory, name), data, 0444); err != nil {
 			t.Fatal(err)
 		}
 	}
-	keyOut := filepath.Join(directory, "publisher.pub")
+	keyOut := filepath.Join(directory, "package.pub")
 	if err := execute([]string{"verify-publisher", "--trust-bootstrap=" + bootstrap, "--bundle=" + filepath.Join(directory, "bundle.json"),
-		"--oci-manifest=" + filepath.Join(directory, "oci-manifest.json"), "--plugin-id=dev.stellwerk.native-probe", "--key-out=" + keyOut}); err != nil {
+		"--sbom-bundle=" + filepath.Join(directory, "sbom.json"), "--provenance-bundle=" + filepath.Join(directory, "provenance.json"),
+		"--oci-manifest=" + filepath.Join(directory, "oci-manifest.json"), "--plugin-id=dev.stellwerk.native-probe", "--key-dir=" + directory}); err != nil {
 		t.Fatal(err)
 	}
 	written, err := os.ReadFile(keyOut)
@@ -197,9 +201,9 @@ func TestAKeyShippedWithThePackageNeverEstablishesTrust(t *testing.T) {
 	}
 	err = execute([]string{"verify-publisher", "--trust-bootstrap=" + bootstrap, "--bundle=" + filepath.Join(packageDirectory, "bundle.json"),
 		"--oci-manifest=" + filepath.Join(packageDirectory, "oci-manifest.json"), "--plugin-id=dev.stellwerk.native-probe",
-		"--key-out=" + filepath.Join(packageDirectory, "publisher.pub")})
+		"--key-dir=" + packageDirectory})
 	expectRefusal(t, err, "does not pin")
-	if _, statErr := os.Stat(filepath.Join(packageDirectory, "publisher.pub")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(packageDirectory, "package.pub")); statErr == nil {
 		t.Fatal("a refused verification still wrote a key")
 	}
 }
@@ -378,8 +382,9 @@ func TestKeyValidityGatesNewInstallationsOnly(t *testing.T) {
 	}
 
 	directory := t.TempDir()
-	bootstrapPath := writeBootstrap(t, managedPublisher(managedKeyNoTlogPolicy,
-		retired.pin(publisherTestNow.AddDate(-2, 0, 0), publisherTestNow.AddDate(0, -1, 0))))
+	optOut := managedPublisher(managedKeyNoTlogPolicy, retired.pin(publisherTestNow.AddDate(-2, 0, 0), publisherTestNow.AddDate(0, -1, 0)))
+	optOut["requireSBOM"], optOut["requireProvenance"] = false, false
+	bootstrapPath := writeBootstrap(t, optOut)
 	for name, data := range map[string][]byte{"bundle.json": bundle, "oci-manifest.json": []byte(signedManifest)} {
 		if err := os.WriteFile(filepath.Join(directory, name), data, 0444); err != nil {
 			t.Fatal(err)
@@ -388,7 +393,7 @@ func TestKeyValidityGatesNewInstallationsOnly(t *testing.T) {
 	command := func(installed string) error {
 		return execute([]string{"verify-publisher", "--trust-bootstrap=" + bootstrapPath, "--bundle=" + filepath.Join(directory, "bundle.json"),
 			"--oci-manifest=" + filepath.Join(directory, "oci-manifest.json"), "--plugin-id=dev.stellwerk.native-probe",
-			"--key-out=" + filepath.Join(directory, "publisher.pub"), "--installed-digest=" + installed})
+			"--key-dir=" + directory, "--installed-digest=" + installed})
 	}
 	expectRefusal(t, command(""), "valid for new installations only")
 	if err := command(manifestDigest(signedManifest)); err != nil {
@@ -432,5 +437,206 @@ func TestRevocationListIsValidated(t *testing.T) {
 		if _, err := loadTrustBootstrap(path); err == nil || !strings.Contains(err.Error(), "unique Cosign key hint") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+var (
+	fixtureSBOM = map[string]any{"spdxVersion": "SPDX-2.3", "SPDXID": "SPDXRef-DOCUMENT", "dataLicense": "CC0-1.0",
+		"name": "native-probe", "documentNamespace": "https://spdx.example.test/native-probe",
+		"packages": []any{map[string]any{"SPDXID": "SPDXRef-Package-native-probe", "name": "native-probe", "versionInfo": "1.0.0"}}}
+	fixtureProvenance = map[string]any{"schemaVersion": 1, "qualification": "clean-source-snapshot",
+		"sources": []any{map[string]any{"commit": strings.Repeat("ab", 20), "path": ".", "dirty": false}}}
+)
+
+// attest produces the bundle `cosign attest-blob --key --signing-config <no
+// tlog> --bundle` writes: an in-toto statement about the subject bytes in a
+// DSSE envelope, signed over the DSSE v1 pre-authentication encoding.
+func (s publisherSigner) attest(t *testing.T, subject []byte, predicateType string, predicate any) []byte {
+	t.Helper()
+	sum := sha256.Sum256(subject)
+	return s.attestStatement(t, map[string]any{
+		"_type":         "https://in-toto.io/Statement/v1",
+		"subject":       []any{map[string]any{"name": "oci-manifest.json", "digest": map[string]string{"sha256": hex.EncodeToString(sum[:])}}},
+		"predicateType": predicateType, "predicate": predicate,
+	})
+}
+
+func (s publisherSigner) attestStatement(t *testing.T, statement map[string]any) []byte {
+	t.Helper()
+	payload := bundleJSON(t, statement)
+	pae := "DSSEv1 " + strconv.Itoa(len(inTotoPayloadType)) + " " + inTotoPayloadType + " " + strconv.Itoa(len(payload)) + " " + string(payload)
+	sum := sha256.Sum256([]byte(pae))
+	signature, err := ecdsa.SignASN1(rand.Reader, s.private, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundleJSON(t, map[string]any{
+		"mediaType":            sigstoreBundleV03,
+		"verificationMaterial": map[string]any{"publicKey": map[string]any{"hint": s.id}},
+		"dsseEnvelope": map[string]any{
+			"payload": base64.StdEncoding.EncodeToString(payload), "payloadType": inTotoPayloadType,
+			"signatures": []any{map[string]any{"sig": base64.StdEncoding.EncodeToString(signature)}},
+		},
+	})
+}
+
+type releaseFixture struct {
+	signer               publisherSigner
+	bootstrap            trustBootstrap
+	signature, sbom, prv []byte
+}
+
+func newReleaseFixture(t *testing.T, publisher func(map[string]any)) releaseFixture {
+	t.Helper()
+	signer := newPublisherSigner(t, elliptic.P256())
+	pin := managedPublisher(managedKeyNoTlogPolicy, signer.validPin())
+	if publisher != nil {
+		publisher(pin)
+	}
+	return releaseFixture{
+		signer:    signer,
+		bootstrap: writeBootstrapDocument(t, map[string]any{"schemaVersion": 1, "publishers": []any{pin}}),
+		signature: signer.sign(t, []byte(signedManifest), signer.id),
+		sbom:      signer.attest(t, []byte(signedManifest), sbomPredicateType, fixtureSBOM),
+		prv:       signer.attest(t, []byte(signedManifest), provenancePredicateType, fixtureProvenance),
+	}
+}
+
+func (f releaseFixture) verify(sbom, provenance []byte, installed string) (releaseKeys, error) {
+	return verifyRelease(f.bootstrap, "dev.stellwerk.native-probe", f.signature, sbom, provenance, []byte(signedManifest), publisherTestNow, installed)
+}
+
+func TestReleaseSetWithSBOMAndProvenanceVerifiesOffline(t *testing.T) {
+	release := newReleaseFixture(t, nil)
+	keys, err := release.verify(release.sbom, release.prv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys.pkg == nil || keys.sbom == nil || keys.provenance == nil || keys.sbom.KeyID != release.signer.id {
+		t.Fatalf("release keys %+v", keys)
+	}
+
+	directory := t.TempDir()
+	bootstrap := writeBootstrap(t, managedPublisher(managedKeyNoTlogPolicy, release.signer.validPin()))
+	for name, data := range map[string][]byte{"bundle.json": release.signature, "sbom.json": release.sbom, "provenance.json": release.prv,
+		"oci-manifest.json": []byte(signedManifest)} {
+		if err := os.WriteFile(filepath.Join(directory, name), data, 0444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := execute([]string{"verify-publisher", "--trust-bootstrap=" + bootstrap, "--bundle=" + filepath.Join(directory, "bundle.json"),
+		"--sbom-bundle=" + filepath.Join(directory, "sbom.json"), "--provenance-bundle=" + filepath.Join(directory, "provenance.json"),
+		"--oci-manifest=" + filepath.Join(directory, "oci-manifest.json"), "--plugin-id=dev.stellwerk.native-probe", "--key-dir=" + directory}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"package.pub", "sbom.pub", "provenance.pub"} {
+		written, err := os.ReadFile(filepath.Join(directory, name))
+		if block, _ := pem.Decode(written); err != nil || block == nil || string(block.Bytes) != string(release.signer.der) {
+			t.Fatalf("%s is not the pinned key: %v", name, err)
+		}
+	}
+}
+
+func TestReleaseSetFailsClosedOnMissingOrForeignAttestations(t *testing.T) {
+	release := newReleaseFixture(t, nil)
+	attacker := newPublisherSigner(t, elliptic.P256())
+	other := []byte(strings.Replace(signedManifest, `"size":10`, `"size":99`, 1))
+	sum := sha256.Sum256([]byte(signedManifest))
+	twoSubjects := release.signer.attestStatement(t, map[string]any{
+		"_type": "https://in-toto.io/Statement/v1", "predicateType": sbomPredicateType, "predicate": fixtureSBOM,
+		"subject": []any{
+			map[string]any{"name": "a", "digest": map[string]string{"sha256": hex.EncodeToString(sum[:])}},
+			map[string]any{"name": "b", "digest": map[string]string{"sha256": strings.Repeat("0", 64)}},
+		},
+	})
+	var tampered map[string]any
+	if err := json.Unmarshal(release.prv, &tampered); err != nil {
+		t.Fatal(err)
+	}
+	envelope := tampered["dsseEnvelope"].(map[string]any)
+	payload, err := base64.StdEncoding.DecodeString(envelope["payload"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope["payload"] = base64.StdEncoding.EncodeToString([]byte(strings.Replace(string(payload), "abab", "cdcd", 1)))
+	var unsignedEnvelope map[string]any
+	if err := json.Unmarshal(release.sbom, &unsignedEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	unsignedEnvelope["dsseEnvelope"].(map[string]any)["signatures"] = []any{}
+	var withCertificate map[string]any
+	if err := json.Unmarshal(release.sbom, &withCertificate); err != nil {
+		t.Fatal(err)
+	}
+	withCertificate["verificationMaterial"].(map[string]any)["certificate"] = map[string]any{"rawBytes": "AAAA"}
+	badSPDX := map[string]any{"SPDXID": "SPDXRef-DOCUMENT", "name": "no version"}
+	badProvenance := map[string]any{"schemaVersion": 1, "sources": []any{map[string]any{"commit": "main"}}}
+
+	for name, test := range map[string]struct {
+		sbom, provenance []byte
+		reason           string
+	}{
+		"missing SBOM":            {nil, release.prv, "requires a signed SBOM attestation"},
+		"missing provenance":      {release.sbom, nil, "requires a signed provenance attestation"},
+		"unsigned SBOM document":  {bundleJSON(t, fixtureSBOM), release.prv, "SBOM attestation must be a Sigstore v0.3 bundle"},
+		"envelope without sig":    {bundleJSON(t, unsignedEnvelope), release.prv, "one signed in-toto DSSE envelope"},
+		"SBOM for another digest": {release.signer.attest(t, other, sbomPredicateType, fixtureSBOM), release.prv, "about another artifact"},
+		"two subjects":            {twoSubjects, release.prv, "about another artifact"},
+		"tampered provenance":     {release.sbom, bundleJSON(t, tampered), "provenance attestation signature does not verify"},
+		"foreign signer":          {attacker.attest(t, []byte(signedManifest), sbomPredicateType, fixtureSBOM), release.prv, "does not pin"},
+		"swapped predicates":      {release.prv, release.sbom, "has predicate type"},
+		"package signature":       {release.signature, release.prv, "one signed in-toto DSSE envelope"},
+		"own certificate":         {bundleJSON(t, withCertificate), release.prv, "carries its own certificate"},
+		"not SPDX":                {release.signer.attest(t, []byte(signedManifest), sbomPredicateType, badSPDX), release.prv, "not an SPDX 2 JSON document"},
+		"provenance without commit": {release.sbom, release.signer.attest(t, []byte(signedManifest), provenancePredicateType, badProvenance),
+			"full git commit"},
+	} {
+		if _, err := release.verify(test.sbom, test.provenance, ""); err == nil || !strings.Contains(err.Error(), test.reason) {
+			t.Errorf("%s: expected %q, got %v", name, test.reason, err)
+		}
+	}
+}
+
+func TestAttestationKeysFollowValidityAndRevocation(t *testing.T) {
+	retired := newPublisherSigner(t, elliptic.P256())
+	current := newPublisherSigner(t, elliptic.P256())
+	pin := managedPublisher(managedKeyNoTlogPolicy, current.validPin(),
+		retired.pin(publisherTestNow.AddDate(-2, 0, 0), publisherTestNow.AddDate(0, -1, 0)))
+	release := releaseFixture{
+		bootstrap: writeBootstrapDocument(t, map[string]any{"schemaVersion": 1, "publishers": []any{pin}}),
+		signature: current.sign(t, []byte(signedManifest), current.id),
+		sbom:      retired.attest(t, []byte(signedManifest), sbomPredicateType, fixtureSBOM),
+		prv:       current.attest(t, []byte(signedManifest), provenancePredicateType, fixtureProvenance),
+	}
+	if _, err := release.verify(release.sbom, release.prv, ""); err == nil || !strings.Contains(err.Error(), "valid for new installations only") {
+		t.Fatalf("new installation with a retired SBOM key: %v", err)
+	}
+	if _, err := release.verify(release.sbom, release.prv, manifestDigest(signedManifest)); err != nil {
+		t.Fatalf("re-fetch of the installed digest: %v", err)
+	}
+	release.bootstrap = writeBootstrapDocument(t, map[string]any{"schemaVersion": 1, "publishers": []any{pin}, "revokedKeyIds": []string{retired.id}})
+	if _, err := release.verify(release.sbom, release.prv, manifestDigest(signedManifest)); err == nil || !strings.Contains(err.Error(), "revokes") {
+		t.Fatalf("revoked SBOM key on re-fetch: %v", err)
+	}
+}
+
+func TestAttestationRequirementsFollowThePublisherEntry(t *testing.T) {
+	optional := newReleaseFixture(t, func(pin map[string]any) {
+		pin["requireSBOM"], pin["requireProvenance"] = false, false
+	})
+	if _, err := optional.verify(nil, nil, ""); err != nil {
+		t.Fatalf("an opted-out publisher needed attestations: %v", err)
+	}
+	other := []byte(strings.Replace(signedManifest, `"size":10`, `"size":99`, 1))
+	if _, err := optional.verify(optional.signer.attest(t, other, sbomPredicateType, fixtureSBOM), nil, ""); err == nil {
+		t.Fatal("a supplied attestation must verify even when it is optional")
+	}
+	sigstore := newReleaseFixture(t, nil)
+	if !*sigstore.bootstrap.Publishers[0].RequireSBOM || !*sigstore.bootstrap.Publishers[0].RequireProvenance {
+		t.Fatal("managed-key-no-tlog publishers must require SBOM and provenance by default")
+	}
+	defaults := writeBootstrapDocument(t, map[string]any{"schemaVersion": 1, "publishers": []any{managedPublisher(sigstorePolicy, sigstore.signer.validPin())}})
+	if *defaults.Publishers[0].RequireSBOM || *defaults.Publishers[0].RequireProvenance {
+		t.Fatal("the default policy has no attestation requirement of this verifier")
 	}
 }

@@ -240,15 +240,19 @@ func writeValidationState(in inputs, state validationState) error {
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	directory := filepath.Dir(in.stateFile)
-	temporary, err := os.CreateTemp(directory, ".runtime-state-")
+	return writeFileAtomically(in.stateFile, append(data, '\n'), 0444)
+}
+
+// writeFileAtomically writes a temporary file with its final mode in the
+// target directory and renames it over path. Readers see the old or the new
+// content, never a partial file.
+func writeFileAtomically(path string, data []byte, mode os.FileMode) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-")
 	if err != nil {
 		return err
 	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0444); err != nil {
+	defer os.Remove(temporary.Name())
+	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
 		return err
 	}
@@ -263,7 +267,7 @@ func writeValidationState(in inputs, state validationState) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, in.stateFile)
+	return os.Rename(temporary.Name(), path)
 }
 
 // validate never changes package files. The executable needs no mode bits
@@ -287,7 +291,7 @@ func filteredEnvironment(source []string, additions map[string]string) []string 
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(name, "STELLWERK_PLUGIN_") || strings.HasPrefix(name, "OTEL_") || name == "SSL_CERT_FILE" {
+		if strings.HasPrefix(name, "STELLWERK_PLUGIN_") || strings.HasPrefix(name, "OTEL_") || name == "SSL_CERT_FILE" || name == coreTokenEnvironment {
 			allowed[name] = value
 		}
 	}
@@ -397,10 +401,15 @@ func parseInputs(command string, args []string) (inputs, error) {
 
 func execute(args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected verify-envelope, validate, run or serve-ui")
+		return errors.New("expected verify-envelope, validate, run, serve-ui, refresh-core-token or check-core-token")
 	}
-	if args[0] == "verify-envelope" {
+	switch args[0] {
+	case "verify-envelope":
 		return verifyEnvelope(args[1:])
+	case "refresh-core-token":
+		return refreshCoreToken(args[1:])
+	case "check-core-token":
+		return checkCoreToken(args[1:])
 	}
 	in, err := parseInputs(args[0], args[1:])
 	if err != nil {

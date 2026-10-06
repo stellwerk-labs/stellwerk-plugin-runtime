@@ -186,14 +186,15 @@ func TestFilteredEnvironment(t *testing.T) {
 	result := filteredEnvironment([]string{
 		"HOME=/secret", "DATABASE_URL=postgres://ambient", "STELLWERK_PLUGIN_CP_URL=https://cp",
 		"OTEL_SERVICE_NAME=probe", "SSL_CERT_FILE=/certs/ca.pem",
+		"STELLWERK_CORE_TOKEN_FILE=/run/stellwerk/core-token/token", "STELLWERK_CORE_TOKEN=PWT-ambient",
 	}, map[string]string{"PLUGIN_ID": "dev.stellwerk.probe"})
 	joined := strings.Join(result, "\n")
-	for _, expected := range []string{"PLUGIN_ID=", "STELLWERK_PLUGIN_CP_URL=", "OTEL_SERVICE_NAME=", "SSL_CERT_FILE="} {
+	for _, expected := range []string{"PLUGIN_ID=", "STELLWERK_PLUGIN_CP_URL=", "OTEL_SERVICE_NAME=", "SSL_CERT_FILE=", "STELLWERK_CORE_TOKEN_FILE=/run/stellwerk/core-token/token"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("missing %s in %q", expected, joined)
 		}
 	}
-	for _, forbidden := range []string{"HOME=", "DATABASE_URL="} {
+	for _, forbidden := range []string{"HOME=", "DATABASE_URL=", "STELLWERK_CORE_TOKEN="} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("leaked %s in %q", forbidden, joined)
 		}

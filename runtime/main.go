@@ -401,7 +401,7 @@ func parseInputs(command string, args []string) (inputs, error) {
 
 func execute(args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected verify-envelope, validate, run, serve-ui, refresh-core-token or check-core-token")
+		return errors.New("expected verify-envelope, verify-publisher, validate, run, serve-ui, refresh-core-token or check-core-token")
 	}
 	switch args[0] {
 	case "verify-envelope":
@@ -410,6 +410,8 @@ func execute(args []string) error {
 		return refreshCoreToken(args[1:])
 	case "check-core-token":
 		return checkCoreToken(args[1:])
+	case "verify-publisher":
+		return verifyPublisher(args[1:])
 	}
 	in, err := parseInputs(args[0], args[1:])
 	if err != nil {

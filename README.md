@@ -57,6 +57,8 @@ jq . "$output/release.json"
 | `validate` | Verify the plugin manifest, selected executable and UI assets against their digests and write a read-only validation receipt. |
 | `run` | Re-verify package and receipt, then execute the verified bytes from a sealed in-memory copy. |
 | `serve-ui` | Serve only manifest-declared, digest-verified UI assets. |
+| `refresh-core-token` | Sidecar for the workload token exchange: keep a short-lived Core token in `STELLWERK_CORE_TOKEN_FILE`. |
+| `check-core-token` | Probe: succeed only while an unexpired Core token is present. |
 
 Every command requires the plugin ID, version and manifest SHA-256 chosen by
 the operator. Package files are read only as bounded regular files; symlinks,
@@ -85,7 +87,7 @@ Requirements and consequences:
   from a close-on-exec memfd and are not part of `native-static-v1`.
 
 `run` hands the plugin a filtered environment: only `STELLWERK_PLUGIN_*`,
-`OTEL_*` and `SSL_CERT_FILE` pass through, plus `PLUGIN_ID`,
+`OTEL_*`, `SSL_CERT_FILE` and `STELLWERK_CORE_TOKEN_FILE` pass through, plus `PLUGIN_ID`,
 `PLUGIN_VERSION`, `PLUGIN_LISTEN`, `PLUGIN_STATE` and `PLUGIN_TRUST_STATE`.
 The plugin becomes the container's PID 1, so it receives `SIGTERM` directly
 and must handle it to shut down cleanly.
@@ -178,6 +180,45 @@ in-flight requests for up to five seconds and exits 0. Route the `ui` port throu
 different from the console, and add the exact Gateway peer for that port to
 `networkPolicy.additionalIngress`. `ui.gateway.enabled` creates a plugin-owned
 Gateway and, with `ui.gateway.issuerName`, a cert-manager Certificate.
+
+### Workload identity
+
+`workloadIdentity.enabled=true` gives the plugin a short-lived Core credential
+instead of a long-lived service-user token (`v1alpha`, see
+[Plugin workload identity](https://docs.stellwerk.dev/platform-orchestrator/docs/architecture/plugins/plugin-workload-identity/)).
+It needs Kubernetes 1.29 or newer, the chart's own ServiceAccount
+(`serviceAccount.create=true`) and an IAM workload binding for exactly that
+ServiceAccount, its namespace and `workloadIdentity.audience`.
+
+```text
+core-token sidecar                    Core gateway -> IAM
+  projected SA token (aud, 600 s) --> POST /auth/plugin-workload-token
+                                  <-- access_token PWT-..., expires_in <= 900 s
+  /run/stellwerk/core-token/token (memory, 0400, atomic rename)
+                                       |
+plugin container  STELLWERK_CORE_TOKEN_FILE, read per request, read-only mount
+```
+
+- The `core-token` native sidecar runs `refresh-core-token` after package
+  validation. Its startup probe holds back the plugin until the first
+  exchange has succeeded; its readiness probe (`check-core-token`) keeps the
+  Pod unready while no unexpired token exists.
+- Only the sidecar mounts the projected token (`expirationSeconds` 600, the
+  Kubernetes minimum and the contract maximum). The plugin container gets the
+  memory-backed token directory read-only and never sees the Kubernetes token.
+- Every exchange re-reads the projected token, which kubelet rotates. The token
+  is refreshed at two thirds of `expires_in`. HTTP 503 and other temporary
+  failures are retried with jittered exponential backoff from 1 s up to 30 s;
+  a token that expires meanwhile is removed. HTTP 400 `invalid_grant` and other
+  refusals remove the token and stop the sidecar with a clear error, so the
+  container restarts visibly. No token is ever logged.
+- `workloadIdentity.gateway.url` is the https origin of the Core gateway;
+  `workloadIdentity.gateway.caSecret` optionally replaces the system roots with
+  a public CA bundle. Redirects are refused. The default NetworkPolicy already
+  permits egress to the backend Gateway proxy.
+- On `SIGTERM` the sidecar stops refreshing and exits 0; the current token
+  stays available for the plugin's own shutdown. A deleted Pod's token stays
+  valid at IAM until it expires (at most 15 minutes).
 
 ## Building the runtime image
 

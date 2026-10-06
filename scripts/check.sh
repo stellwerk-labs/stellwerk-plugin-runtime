@@ -415,4 +415,89 @@ if helm template native-ui charts/native-plugin-runtime "${ui_args[@]}" --set-js
   exit 1
 fi
 
+# Workload token exchange: only the core-token native
+# sidecar mounts the projected ServiceAccount token; the plugin gets the
+# memory-backed Core token file and nothing else.
+for document in rendered ui migration-rendered; do
+  if grep -E -q 'core-token|serviceAccountToken|STELLWERK_CORE_TOKEN_FILE' "$fixture/$document.yaml"; then
+    echo "$document.yaml carries workload identity although it is disabled" >&2
+    exit 1
+  fi
+done
+workload_args=(
+  "${ui_args[@]}"
+  --set workloadIdentity.enabled=true
+  --set-string workloadIdentity.audience=stellwerk-plugin-workload
+  --set-string workloadIdentity.gateway.url=https://api.example.test
+  --set-string workloadIdentity.gateway.caSecret.name=gateway-ca
+)
+helm lint charts/native-plugin-runtime "${workload_args[@]}" >/dev/null
+helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" >"$fixture/workload.yaml"
+python3 - "$fixture/workload.yaml" <<'PY'
+import re
+import sys
+
+rendered = open(sys.argv[1], encoding="utf-8").read()
+deployment = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: Deployment$", doc, re.M))
+init, rest = deployment.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)
+main, volumes = rest.split("      volumes:\n", 1)
+
+
+def blocks(section):
+    return dict(re.findall(r"^        - name: ([a-z-]+)\n((?:(?:          .*)?\n)*)", section, re.M))
+
+
+init_blocks, main_blocks, volume_blocks = blocks(init), blocks(main), blocks(volumes)
+assert list(init_blocks) == ["fetch-package-envelope", "verify-package-envelope", "pull-package",
+                             "validate-package", "core-token"], list(init_blocks)
+sidecar = init_blocks["core-token"]
+assert "restartPolicy: Always" in sidecar
+assert sidecar.count("command: [/runtime, check-core-token, --token-file=/run/stellwerk/core-token/token]") == 2
+assert "startupProbe:" in sidecar and "readinessProbe:" in sidecar
+for argument in ["- refresh-core-token", "- --gateway-url=https://api.example.test",
+                 "- --subject-token-file=/var/run/secrets/stellwerk/workload/token",
+                 "- --token-file=/run/stellwerk/core-token/token", "- --ca-file=/run/stellwerk/gateway-ca/ca.crt"]:
+    assert argument in sidecar, argument
+assert re.search(r"- name: workload-token\n\s+mountPath: /var/run/secrets/stellwerk/workload\n\s+readOnly: true", sidecar)
+assert re.search(r"- name: core-token\n\s+mountPath: /run/stellwerk/core-token\n(?!\s+readOnly)", sidecar)
+assert "readOnlyRootFilesystem: true" in sidecar and "drop: [ALL]" in sidecar
+for name, block in {**init_blocks, **main_blocks}.items():
+    if name != "core-token":
+        assert "workload-token" not in block and "gateway-ca" not in block, name
+for name in ["fetch-package-envelope", "verify-package-envelope", "pull-package", "validate-package", "ui"]:
+    assert "core-token" not in {**init_blocks, **main_blocks}[name], name
+plugin = main_blocks["plugin"]
+assert "- name: STELLWERK_CORE_TOKEN_FILE\n              value: /run/stellwerk/core-token/token" in plugin
+assert re.search(r"- name: core-token\n\s+mountPath: /run/stellwerk/core-token\n\s+readOnly: true", plugin)
+projected = volume_blocks["workload-token"]
+for expected in ['audience: "stellwerk-plugin-workload"', "expirationSeconds: 600", "path: token", "defaultMode: 0440"]:
+    assert expected in projected, expected
+assert "medium: Memory" in volume_blocks["core-token"] and "sizeLimit: 1Mi" in volume_blocks["core-token"]
+assert "secretName: gateway-ca" in volume_blocks["gateway-ca"] and "defaultMode: 0440" in volume_blocks["gateway-ca"]
+assert "      serviceAccountName: native-ui-native-plugin-runtime\n" in deployment
+assert "      automountServiceAccountToken: false\n" in deployment
+PY
+helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" \
+  --set workloadIdentity.enabled=true --set-string workloadIdentity.audience=stellwerk-plugin-workload \
+  --set-string workloadIdentity.gateway.url=https://api.example.test >"$fixture/migration-workload.yaml"
+if grep -E -q 'core-token|serviceAccountToken' "$fixture/migration-workload.yaml"; then
+  echo "the migration Job received the Core token exchange" >&2
+  exit 1
+fi
+# Helm applies --set-string after --set, so string overrides use --set-string.
+for invalid in "--set-string=workloadIdentity.audience=" "--set-string=workloadIdentity.gateway.url=" \
+  "--set-string=workloadIdentity.gateway.url=http://api.example.test" \
+  "--set-string=workloadIdentity.gateway.url=https://api.example.test/iam" \
+  "--set=workloadIdentity.expirationSeconds=3600" "--set=workloadIdentity.expirationSeconds=599" \
+  "--set=serviceAccount.create=false,serviceAccount.name=shared" "--set=serviceAccount.projectedIdentity.enabled=true"; do
+  if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" "$invalid" >/dev/null 2>&1; then
+    echo "chart accepted workload identity setting $invalid" >&2
+    exit 1
+  fi
+done
+if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" --kube-version 1.28.0 >/dev/null 2>&1; then
+  echo "chart rendered the native token sidecar for Kubernetes 1.28" >&2
+  exit 1
+fi
+
 echo "All native runtime, package and chart checks passed."

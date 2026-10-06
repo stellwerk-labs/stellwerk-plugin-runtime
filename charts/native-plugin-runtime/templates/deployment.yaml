@@ -5,6 +5,14 @@
 {{- if and .Values.ui.enabled .Values.networkPolicy.enabled (eq (len .Values.networkPolicy.additionalIngress) 0) }}
 {{- fail "ui.enabled with networkPolicy.enabled requires an exact UI Gateway peer and ui.port rule in networkPolicy.additionalIngress" }}
 {{- end }}
+{{- if .Values.workloadIdentity.enabled }}
+{{- if not .Values.serviceAccount.create }}
+{{- fail "workloadIdentity requires the chart's own ServiceAccount (serviceAccount.create=true): an IAM workload binding names exactly one ServiceAccount per installation" }}
+{{- end }}
+{{- if semverCompare "<1.29.0-0" .Capabilities.KubeVersion.Version }}
+{{- fail "workloadIdentity runs the token exchange as a native sidecar and requires Kubernetes 1.29 or newer" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -180,6 +188,50 @@ spec:
               mountPath: /package
             - name: temporary
               mountPath: /tmp
+        {{- if .Values.workloadIdentity.enabled }}
+        # Native sidecar: started after validation, the plugin starts only once
+        # its startup probe sees a valid Core token. Only this container
+        # mounts the projected ServiceAccount token.
+        - name: core-token
+          image: {{ .Values.images.runtime | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          restartPolicy: Always
+          args:
+            - refresh-core-token
+            - --gateway-url={{ .Values.workloadIdentity.gateway.url }}
+            - --subject-token-file=/var/run/secrets/stellwerk/workload/token
+            - --token-file=/run/stellwerk/core-token/token
+            {{- if .Values.workloadIdentity.gateway.caSecret.name }}
+            - --ca-file=/run/stellwerk/gateway-ca/ca.crt
+            {{- end }}
+          startupProbe:
+            exec:
+              command: [/runtime, check-core-token, --token-file=/run/stellwerk/core-token/token]
+            periodSeconds: 2
+            failureThreshold: 150
+          readinessProbe:
+            exec:
+              command: [/runtime, check-core-token, --token-file=/run/stellwerk/core-token/token]
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.workloadIdentity.resources | nindent 12 }}
+          volumeMounts:
+            - name: workload-token
+              mountPath: /var/run/secrets/stellwerk/workload
+              readOnly: true
+            - name: core-token
+              mountPath: /run/stellwerk/core-token
+            {{- if .Values.workloadIdentity.gateway.caSecret.name }}
+            - name: gateway-ca
+              mountPath: /run/stellwerk/gateway-ca
+              readOnly: true
+            {{- end }}
+        {{- end }}
       containers:
         - name: plugin
           image: {{ required "images.runtime is required" .Values.images.runtime | quote }}
@@ -189,9 +241,15 @@ spec:
             {{- include "native-plugin-runtime.commonArgs" . | nindent 12 }}
             - --listen=0.0.0.0:{{ .Values.plugin.port }}
             - --plugin-state=/state
-          {{- with .Values.pluginEnv }}
+          {{- if or .Values.pluginEnv .Values.workloadIdentity.enabled }}
           env:
+            {{- if .Values.workloadIdentity.enabled }}
+            - name: STELLWERK_CORE_TOKEN_FILE
+              value: /run/stellwerk/core-token/token
+            {{- end }}
+            {{- with .Values.pluginEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           ports:
             - name: http
@@ -231,9 +289,9 @@ spec:
               mountPath: /state
             - name: temporary
               mountPath: /tmp
-            {{- if .Values.serviceAccount.projectedIdentity.enabled }}
-            - name: workload-identity
-              mountPath: /var/run/secrets/stellwerk.dev
+            {{- if .Values.workloadIdentity.enabled }}
+            - name: core-token
+              mountPath: /run/stellwerk/core-token
               readOnly: true
             {{- end }}
             {{- range .Values.pluginSecretFiles }}
@@ -311,15 +369,28 @@ spec:
               - key: {{ .Values.package.registryConfigSecret.key }}
                 path: config.json
         {{- end }}
-        {{- if .Values.serviceAccount.projectedIdentity.enabled }}
-        - name: workload-identity
+        {{- if .Values.workloadIdentity.enabled }}
+        - name: workload-token
           projected:
             defaultMode: 0440
             sources:
               - serviceAccountToken:
-                  audience: {{ .Values.serviceAccount.projectedIdentity.audience | quote }}
-                  expirationSeconds: {{ .Values.serviceAccount.projectedIdentity.expirationSeconds }}
+                  audience: {{ .Values.workloadIdentity.audience | quote }}
+                  expirationSeconds: {{ .Values.workloadIdentity.expirationSeconds }}
                   path: token
+        - name: core-token
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- if .Values.workloadIdentity.gateway.caSecret.name }}
+        - name: gateway-ca
+          secret:
+            secretName: {{ .Values.workloadIdentity.gateway.caSecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.workloadIdentity.gateway.caSecret.key }}
+                path: ca.crt
+        {{- end }}
         {{- end }}
         {{- range .Values.pluginSecretFiles }}
         - name: {{ .name }}

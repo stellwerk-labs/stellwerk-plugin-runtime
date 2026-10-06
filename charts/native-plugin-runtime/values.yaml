@@ -91,10 +91,32 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}
-  projectedIdentity:
-    enabled: false
-    audience: platform-orchestrator
-    expirationSeconds: 600
+
+# Workload token exchange (v1alpha). A core-token sidecar
+# presents a projected ServiceAccount token to IAM through the Core gateway
+# before the plugin starts and keeps the issued short-lived Core token fresh
+# in a memory-backed file named by STELLWERK_CORE_TOKEN_FILE. Only the
+# sidecar mounts the Kubernetes token. Needs Kubernetes 1.29+, the chart's own
+# ServiceAccount and an IAM workload binding for exactly that ServiceAccount.
+workloadIdentity:
+  enabled: false
+  # Exchange audience of the IAM workload binding. Required when enabled.
+  audience: ""
+  # Projected token lifetime: Kubernetes requires at least 600 seconds and the
+  # exchange contract allows at most 600.
+  expirationSeconds: 600
+  gateway:
+    # https origin of the Core gateway routing /auth/plugin-workload-token to
+    # IAM. Required when enabled.
+    url: ""
+    # Optional public CA bundle for the gateway certificate; replaces the
+    # system roots when set.
+    caSecret:
+      name: ""
+      key: ca.crt
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 100m, memory: 64Mi}
 
 podAnnotations: {}
 podLabels: {}
@@ -147,7 +169,8 @@ probes:
 terminationGracePeriodSeconds: 10
 
 # Only these explicitly supplied names reach the executable. The launcher also
-# filters its process environment to STELLWERK_PLUGIN_*, OTEL_* and SSL_CERT_FILE.
+# filters its process environment to STELLWERK_PLUGIN_*, OTEL_*, SSL_CERT_FILE and
+# STELLWERK_CORE_TOKEN_FILE, which workloadIdentity sets.
 pluginEnv: []
 
 # Operator-owned configuration mounted only into the plugin container. Use a

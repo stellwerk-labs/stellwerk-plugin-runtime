@@ -117,7 +117,31 @@
         "pullSecrets": {"type": "array", "items": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}, "additionalProperties": false}}
       }
     },
-    "serviceAccount": {"type": "object"},
+    "serviceAccount": {"$ref": "#/definitions/serviceAccount"},
+    "workloadIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "audience", "expirationSeconds", "gateway", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "audience": {"type": "string"},
+        "expirationSeconds": {"type": "integer", "minimum": 600, "maximum": 600},
+        "gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "caSecret"],
+          "properties": {
+            "url": {"type": "string"},
+            "caSecret": {"$ref": "#/definitions/secretKeyReference"}
+          }
+        },
+        "resources": {"type": "object"}
+      },
+      "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {
+        "audience": {"pattern": "^[!-~]{1,256}$"},
+        "gateway": {"properties": {"url": {"pattern": "^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$"}}}
+      }}}]
+    },
     "podAnnotations": {"type": "object"},
     "podLabels": {"type": "object"},
     "resources": {"type": "object"},

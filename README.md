@@ -53,6 +53,7 @@ jq . "$output/release.json"
 
 | Command | Purpose |
 |---|---|
+| `verify-publisher` | Apply the operator's trust bootstrap: accept a bundle without transparency-log inclusion only for a publisher pinned with `managed-key-no-tlog`, verify it offline and write the pinned key for Cosign. |
 | `verify-envelope` | Before any content is pulled, bind the fetched OCI manifest to the pinned package digest and the operator-approved plugin manifest hash, and admit only the layers of the package format. |
 | `validate` | Verify the plugin manifest, selected executable and UI assets against their digests and write a read-only validation receipt. |
 | `run` | Re-verify package and receipt, then execute the verified bytes from a sealed in-memory copy. |
@@ -96,21 +97,58 @@ and must handle it to shut down cleanly.
 
 Package trust and entitlement trust are separate decisions.
 
-In both modes the chart first fetches the OCI manifest by digest and checks
-it with `verify-envelope`; package content is pulled only afterwards.
+In both modes each Pod's fetch init containers first fetch the OCI manifest
+by digest and check it with `verify-envelope`; package content is pulled
+only afterwards.
 
-- `cosign-key`: additionally verifies the detached Cosign bundle over those
-  exact manifest bytes with the operator's pinned public key before the pull.
-  The receipt records `verified-local-key`.
+- `managed-key-no-tlog`: the trust policy for private commercial packages,
+  which are signed with a managed key and never uploaded to a public
+  transparency log, so private digests, identities and release cadence stay
+  unpublished. Before the pull, `verify-publisher` evaluates the operator's
+  trust bootstrap and the detached bundle, and Cosign then verifies the same
+  manifest bytes again with the key the gate selected. The receipt records
+  `verified-local-key`.
 - `development-untrusted`: skips signature verification and is visible to the
   plugin as `untrusted-development`. It exists for local development only.
 
+The trust bootstrap (`trust.bootstrapSecret`, `publishers.json`) is the
+operator's authentic statement of who may sign what. It never comes from a
+package:
+
+```json
+{"schemaVersion": 1, "publishers": [{
+  "id": "stellwerk", "policy": "managed-key-no-tlog",
+  "pluginIds": ["dev.stellwerk.example"],
+  "keys": [{"keyId": "<base64 SHA-256 of the DER public key>", "algorithm": "ecdsa-p256-sha256",
+            "publicKey": "-----BEGIN PUBLIC KEY-----\n...", "validFrom": "2026-10-01T00:00:00Z",
+            "validUntil": "2027-10-01T00:00:00Z"}]}],
+ "revokedKeyIds": []}
+```
+
+- A missing transparency-log inclusion is accepted only when the approved
+  plugin ID belongs to a publisher pinned with `managed-key-no-tlog`. A
+  publisher without a policy, or with `sigstore`, is on the default Sigstore
+  policy and is refused by this verifier; its transparency-log verification
+  is not provided by this chart yet.
+- Each plugin ID belongs to exactly one publisher and each key to one entry.
+  The bundle must name a pinned key by its Cosign hint (`keyId`), carry no
+  certificate of its own and hold a message signature over the exact OCI
+  manifest. A key shipped in a package or bundle never establishes trust.
+- Without a transparency log the signing time is unprovable, so a key's
+  validity window gates new installations only. Once an installation
+  succeeded, the installer records its digest in `package.installedDigest`;
+  re-fetching exactly that digest (Pod restarts, new replicas) keeps
+  verifying with the pinned key after the window ended. Any other digest is
+  a new installation and needs a key that is valid now. Several keys with
+  overlapping windows allow rotation.
+- `revokedKeyIds` (top level, key hints) is the compromise list: a revoked
+  key blocks new installations and re-fetches of installed digests alike.
+- Publisher signing keys and entitlement issuer keys are separate keys.
+
 Signatures authenticate code; they do not sandbox it. Native plugins share the
-node kernel with other workloads. A valid key signature proves package
-integrity for the key holder, not a production publisher identity, key custody
-or transparency policy. An entitlement declaration in the manifest states a
-requirement; the control plane verifies licences against its own issuer
-trust, the launcher never sees licence keys.
+node kernel with other workloads. An entitlement declaration in the manifest
+states a requirement; the control plane verifies licences against its own
+issuer trust, the launcher never sees licence keys.
 
 Offline signing and verification use the digest-pinned official Cosign image
 with networking disabled:
@@ -121,16 +159,18 @@ with networking disabled:
 ./scripts/offline-bundle.sh "$output" package.tar   # air-gapped transfer
 ```
 
-The signature covers the exact OCI manifest bytes, so publishing must
-preserve the manifest digest. Pinned-key bundles deliberately carry no public
-transparency log entry, hence `--insecure-ignore-tlog`; the public key check
-itself remains mandatory.
+Signing uses Cosign's signing-config mechanism with a configuration that
+lists no transparency log, timestamp authority or certificate authority
+(`scripts/signing-config-no-tlog.json`); the deprecated `--tlog-upload=false`
+is not used. The signature covers the exact OCI manifest bytes, so publishing
+must preserve the manifest digest. Cosign verifies such bundles with
+`--insecure-ignore-tlog`, which the chart passes only after the policy gate.
 
 ## Helm chart
 
 The chart is disabled by default and creates nothing until `enabled=true`. An
 enabled installation requires a digest-pinned package reference, runtime image
-and ORAS image (plus a Cosign image for `cosign-key`), the exact plugin
+and ORAS image (plus a Cosign image for `managed-key-no-tlog`), the exact plugin
 manifest hash and an explicit `trust.mode`; there is no default trust mode. No
 image, digest, trust root or key is shipped as a default.
 
@@ -138,17 +178,40 @@ It deploys one `Recreate` workload with a dedicated ServiceAccount (token
 automount disabled), non-root security contexts, read-only root and package mounts, bounded
 resources and a default NetworkPolicy. Secret volumes are mounted `0440`,
 the state `emptyDir` is bounded by `stateVolume.sizeLimit` and service links
-are disabled. Only the ORAS init containers receive registry credentials. `pluginSecretFiles` mounts operator-owned Secrets into
-the plugin container only, never into fetch or verification containers.
+are disabled. `pluginSecretFiles` mounts operator-owned Secrets into the
+plugin container only, never into the fetch init containers.
+
+### Package fetch
+
+Every replica fetches and verifies its own copy of the package in init
+containers (`fetch-package-envelope`, `verify-package-envelope`, for
+`managed-key-no-tlog` `verify-package-publisher` and
+`verify-package-signature`, then `pull-package` and `validate-package`) into
+an `emptyDir` (`packageVolume.sizeLimit`). Replicas therefore need no shared
+storage and can run on any node. Registry credentials and the ORAS image
+reach only the two ORAS init containers, the trust bootstrap only the
+publisher gate, and the signature bundle only the gate and Cosign; the
+plugin, UI and token containers mount none of them and see the package
+read-only.
+
+Registry egress is limited to the customer's mirror endpoints listed in
+`networkPolicy.registryMirrors`: single addresses (`/32` or `/128`) or exact
+in-cluster peers (namespace and Pod selector), each with a port. Ranges,
+namespace-only peers and free-form rules are rejected, and nothing is open by
+default. Residual risk: NetworkPolicy applies per Pod, so the plugin and UI
+containers can also reach those mirror endpoints. They hold no registry
+credentials, and the mirror should serve only the packages and images this
+installation needs. Kubernetes image volumes would let the kubelet fetch the
+package with node credentials and remove even that; they are a later option
+once the supported Kubernetes minimum includes them as stable.
 
 The NetworkPolicy admits only the configured control plane caller and permits
 egress only to the backend Gateway proxy, the plugin database and DNS. The
 default selectors match the `platform-orchestrator` release of the Stellwerk
 Helm chart (Envoy Gateway proxy target port 10443, CloudNativePG cluster);
 override them for other installations. The configured control plane URL must
-resolve to that same Gateway. Package pulls fail closed until the operator adds
-an exact registry rule under `networkPolicy.additionalEgress`; no public
-registry CIDR is a safe default.
+resolve to that same Gateway. Package fetching fails closed until the
+operator lists the registry mirror endpoints (see Package fetch).
 
 ### Migration phase
 
@@ -160,8 +223,9 @@ at once. The migration profile (`mode: native-migrate`) comes from
 `migration.profileSecret`, the migration principal's database URL from a
 separate `migration.databaseSecret` mounted at
 `/run/secrets/stellwerk-plugin-migration/database-url`. Neither Secret reaches
-ORAS, Cosign, validation or the runtime Deployment, and the chart refuses to
-mount them into the runtime.
+the fetch init containers or the runtime Deployment, and the chart refuses to
+mount them into the runtime. The migration Job fetches and verifies its own
+package copy like a runtime replica.
 
 The optional `migration.databaseCASecret` mounts one public CA key read-only at
 `/run/config/database-ca/ca.crt` in the migration container only, so the

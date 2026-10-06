@@ -65,9 +65,10 @@
     "package": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reference", "manifestSHA256", "plainHTTP", "registryConfigSecret"],
+      "required": ["reference", "manifestSHA256", "installedDigest", "plainHTTP", "registryConfigSecret"],
       "properties": {
         "reference": {"type": "string"},
+        "installedDigest": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"},
         "manifestSHA256": {"type": "string"},
         "plainHTTP": {"type": "boolean"},
         "registryConfigSecret": {
@@ -81,28 +82,11 @@
     "trust": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "cosign"],
+      "required": ["mode", "bootstrapSecret", "signatureBundleSecret"],
       "properties": {
-        "mode": {"enum": ["", "development-untrusted", "cosign-key"]},
-        "cosign": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["publicKeySecret", "signatureBundleSecret"],
-          "properties": {
-            "publicKeySecret": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["name", "key"],
-              "properties": {"name": {"type": "string"}, "key": {"type": "string", "minLength": 1}}
-            },
-            "signatureBundleSecret": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["name", "key"],
-              "properties": {"name": {"type": "string"}, "key": {"type": "string", "minLength": 1}}
-            }
-          }
-        }
+        "mode": {"enum": ["", "development-untrusted", "managed-key-no-tlog"]},
+        "bootstrapSecret": {"$ref": "#/definitions/secretKeyReference"},
+        "signatureBundleSecret": {"$ref": "#/definitions/secretKeyReference"}
       }
     },
     "images": {
@@ -146,7 +130,12 @@
     "podLabels": {"type": "object"},
     "resources": {"type": "object"},
     "initResources": {"type": "object"},
-    "packageVolume": {"type": "object"},
+    "packageVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizeLimit"],
+      "properties": {"sizeLimit": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi)$"}}
+    },
     "stateVolume": {
       "type": "object",
       "additionalProperties": false,
@@ -211,7 +200,7 @@
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "ingressGateway", "coreGateway", "database", "dns", "additionalIngress", "additionalEgress"],
+      "required": ["enabled", "ingressGateway", "coreGateway", "database", "dns", "registryMirrors", "additionalIngress", "additionalEgress"],
       "properties": {
         "enabled": {"type": "boolean"},
         "ingressGateway": {"$ref": "#/definitions/peer"},
@@ -226,6 +215,7 @@
             "podSelector": {"$ref": "#/definitions/labels"}
           }
         },
+        "registryMirrors": {"type": "array", "items": {"$ref": "#/definitions/registryMirror"}},
         "additionalIngress": {"type": "array", "items": {"type": "object"}},
         "additionalEgress": {"type": "array", "items": {"type": "object"}}
       }
@@ -283,6 +273,30 @@
         "podSelector": {"$ref": "#/definitions/labels"}
       }
     },
+    "registryMirror": {
+      "description": "One mirror address or one exact in-cluster peer. Ranges, namespace-only peers and portless rules are rejected.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cidr", "port"],
+          "properties": {
+            "cidr": {"type": "string", "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$|^[0-9A-Fa-f:]+/128$"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["namespaceSelector", "podSelector", "port"],
+          "properties": {
+            "namespaceSelector": {"$ref": "#/definitions/labels"},
+            "podSelector": {"$ref": "#/definitions/labels"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+          }
+        }
+      ]
+    },
     "tcpPeer": {
       "type": "object",
       "additionalProperties": false,
@@ -317,19 +331,19 @@
               "oras": {"pattern": "@sha256:[0-9a-f]{64}$"}
             }
           },
-          "trust": {"properties": {"mode": {"enum": ["development-untrusted", "cosign-key"]}}}
+          "trust": {"properties": {"mode": {"enum": ["development-untrusted", "managed-key-no-tlog"]}}}
         }
       }
     },
     {
-      "if": {"properties": {"trust": {"properties": {"mode": {"const": "cosign-key"}}}}},
+      "if": {"properties": {"trust": {"properties": {"mode": {"const": "managed-key-no-tlog"}}}}},
       "then": {
         "properties": {
           "images": {"properties": {"cosign": {"pattern": "@sha256:[0-9a-f]{64}$"}}},
-          "trust": {"properties": {"cosign": {"properties": {
-            "publicKeySecret": {"properties": {"name": {"minLength": 1}}},
+          "trust": {"properties": {
+            "bootstrapSecret": {"properties": {"name": {"minLength": 1}}},
             "signatureBundleSecret": {"properties": {"name": {"minLength": 1}}}
-          }}}}
+          }}
         }
       }
     },

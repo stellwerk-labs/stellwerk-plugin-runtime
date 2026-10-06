@@ -56,3 +56,231 @@ app.kubernetes.io/component: migration
 - --development-untrusted
 {{- end }}
 {{- end -}}
+
+{{/* Every replica fetches and verifies its own package copy into an emptyDir.
+Registry credentials, ORAS and trust material reach only these init
+containers, never the plugin, UI or token containers. */}}
+{{- define "native-plugin-runtime.fetchInitContainers" -}}
+{{- $managedKey := eq .Values.trust.mode "managed-key-no-tlog" }}
+- name: fetch-package-envelope
+  image: {{ required "images.oras is required" .Values.images.oras | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - manifest
+    - fetch
+    - --output=/package/oci-manifest.json
+    {{- if .Values.package.plainHTTP }}
+    - --plain-http
+    {{- end }}
+    {{- if .Values.package.registryConfigSecret.name }}
+    - --registry-config=/registry/config.json
+    {{- end }}
+    - {{ .Values.package.reference | quote }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+    {{- if .Values.package.registryConfigSecret.name }}
+    - name: registry-config
+      mountPath: /registry
+      readOnly: true
+    {{- end }}
+    - name: temporary
+      mountPath: /tmp
+- name: verify-package-envelope
+  image: {{ required "images.runtime is required" .Values.images.runtime | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - verify-envelope
+    - --oci-manifest=/package/oci-manifest.json
+    - --package-digest={{ regexFind "sha256:[0-9a-f]{64}$" .Values.package.reference }}
+    - --manifest-sha256={{ .Values.package.manifestSHA256 }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+      readOnly: true
+{{- if $managedKey }}
+# Policy gate: the operator's trust bootstrap must pin this plugin's
+# publisher with managed-key-no-tlog; selects and checks the pinned key.
+- name: verify-package-publisher
+  image: {{ .Values.images.runtime | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - verify-publisher
+    - --trust-bootstrap=/trust/publishers.json
+    - --bundle=/signature/oci-manifest.sigstore.json
+    - --oci-manifest=/package/oci-manifest.json
+    - --plugin-id={{ .Values.plugin.id }}
+    - --key-out=/verify/publisher.pub
+    {{- with .Values.package.installedDigest }}
+    - --installed-digest={{ . }}
+    {{- end }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+      readOnly: true
+    - name: trust
+      mountPath: /trust
+      readOnly: true
+    - name: signature-bundle
+      mountPath: /signature
+      readOnly: true
+    - name: verify
+      mountPath: /verify
+# Independent Cosign verification with the key the gate selected.
+# Skipping the transparency log is valid only after that gate.
+- name: verify-package-signature
+  image: {{ required "images.cosign is required for managed-key-no-tlog trust" .Values.images.cosign | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - verify-blob
+    - --insecure-ignore-tlog
+    - --key=/verify/publisher.pub
+    - --bundle=/signature/oci-manifest.sigstore.json
+    - /package/oci-manifest.json
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+      readOnly: true
+    - name: verify
+      mountPath: /verify
+      readOnly: true
+    - name: signature-bundle
+      mountPath: /signature
+      readOnly: true
+    - name: temporary
+      mountPath: /tmp
+{{- end }}
+- name: pull-package
+  image: {{ .Values.images.oras | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - pull
+    - --no-tty
+    - --output=/package
+    {{- if .Values.package.plainHTTP }}
+    - --plain-http
+    {{- end }}
+    {{- if .Values.package.registryConfigSecret.name }}
+    - --registry-config=/registry/config.json
+    {{- end }}
+    - {{ .Values.package.reference | quote }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+    {{- if .Values.package.registryConfigSecret.name }}
+    - name: registry-config
+      mountPath: /registry
+      readOnly: true
+    {{- end }}
+    - name: temporary
+      mountPath: /tmp
+- name: validate-package
+  image: {{ .Values.images.runtime | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - validate
+    {{- include "native-plugin-runtime.commonArgs" . | nindent 4 }}
+    - --trust-state={{ if $managedKey }}verified-local-key{{ else }}untrusted-development{{ end }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+{{- end -}}
+
+{{- define "native-plugin-runtime.fetchVolumes" -}}
+{{- $managedKey := eq .Values.trust.mode "managed-key-no-tlog" }}
+{{- if $managedKey }}
+- name: verify
+  emptyDir:
+    medium: Memory
+    sizeLimit: 1Mi
+- name: trust
+  secret:
+    secretName: {{ required "trust.bootstrapSecret.name is required" .Values.trust.bootstrapSecret.name }}
+    defaultMode: 0440
+    items:
+      - key: {{ .Values.trust.bootstrapSecret.key }}
+        path: publishers.json
+- name: signature-bundle
+  secret:
+    secretName: {{ required "trust.signatureBundleSecret.name is required" .Values.trust.signatureBundleSecret.name }}
+    defaultMode: 0440
+    items:
+      - key: {{ .Values.trust.signatureBundleSecret.key }}
+        path: oci-manifest.sigstore.json
+{{- end }}
+{{- if .Values.package.registryConfigSecret.name }}
+- name: registry-config
+  secret:
+    secretName: {{ .Values.package.registryConfigSecret.name }}
+    defaultMode: 0440
+    items:
+      - key: {{ .Values.package.registryConfigSecret.key }}
+        path: config.json
+{{- end }}
+{{- end -}}
+
+{{/* Registry egress for the fetch init containers: exactly the configured
+mirror endpoints (single addresses or exact in-cluster selectors) and ports.
+NetworkPolicy is per Pod, so the plugin container can reach these endpoints
+too; it holds no registry credentials. */}}
+{{- define "native-plugin-runtime.registryMirrorEgress" -}}
+{{- range .Values.networkPolicy.registryMirrors }}
+- to:
+    {{- if .cidr }}
+    - ipBlock:
+        cidr: {{ .cidr | quote }}
+    {{- else }}
+    - namespaceSelector:
+        matchLabels:
+          {{- toYaml .namespaceSelector | nindent 10 }}
+      podSelector:
+        matchLabels:
+          {{- toYaml .podSelector | nindent 10 }}
+    {{- end }}
+  ports:
+    - protocol: TCP
+      port: {{ .port }}
+{{- end }}
+{{- end -}}

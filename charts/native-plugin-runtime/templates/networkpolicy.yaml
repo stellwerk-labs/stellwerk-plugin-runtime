@@ -57,6 +57,7 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    {{- include "native-plugin-runtime.registryMirrorEgress" . | nindent 4 }}
     {{- with .Values.networkPolicy.additionalEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

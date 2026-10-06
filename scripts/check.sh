@@ -67,7 +67,7 @@ rendered = open(sys.argv[1], encoding="utf-8").read()
 policy = next(
     document
     for document in rendered.split("\n---")
-    if re.search(r"^kind: NetworkPolicy$", document, re.M)
+    if re.search(r"^kind: NetworkPolicy$", document, re.M) and "\n  name: native-probe-native-plugin-runtime\n" in document
 )
 assert "app.kubernetes.io/name: control-plane" in policy
 assert "app.kubernetes.io/instance: platform-orchestrator" in policy
@@ -149,11 +149,11 @@ assert "mountPath: /run/secrets/stellwerk-plugin-migration/database-url" in rend
 assert "secretName: plugin-migration-profile" in rendered
 assert "secretName: plugin-migration-database" in rendered
 assert rendered.count("defaultMode: 0440") >= 2
-job = next(document for document in rendered.split("\n---") if re.search(r"^kind: Job$", document, re.M))
+job = next(document for document in rendered.split("\n---") if re.search(r"^kind: Job$", document, re.M) and "app.kubernetes.io/component: migration" in document)
 init_containers = job.split("\n      initContainers:", 1)[1].split("\n      containers:", 1)[0]
 assert "migration-profile" not in init_containers
 assert "migration-database" not in init_containers
-policy = next(document for document in rendered.split("\n---") if re.search(r"^kind: NetworkPolicy$", document, re.M))
+policy = next(document for document in rendered.split("\n---") if re.search(r"^kind: NetworkPolicy$", document, re.M) and "-migration\n" in document)
 assert "platform-orchestrator-cnpg-databases" in policy
 assert "k8s-app: kube-dns" in policy
 assert "owning-gateway" not in policy
@@ -168,7 +168,7 @@ import re
 import sys
 
 rendered = open(sys.argv[1], encoding="utf-8").read()
-job = next(document for document in rendered.split("\n---") if re.search(r"^kind: Job$", document, re.M))
+job = next(document for document in rendered.split("\n---") if re.search(r"^kind: Job$", document, re.M) and "app.kubernetes.io/component: migration" in document)
 init, executor = job.split("      containers:\n", 1)
 assert "migration-database-ca" not in init
 assert "mountPath: /run/config/database-ca" in executor
@@ -239,9 +239,9 @@ helm template native-probe charts/native-plugin-runtime \
   --set-string package.manifestSHA256="$manifest_hash" \
   --set-string images.runtime=registry.invalid/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   --set-string images.oras=registry.invalid/oras@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-  --set-string trust.mode=cosign-key \
-  --set-string trust.cosign.publicKeySecret.name=fixture-trust \
-  --set-string trust.cosign.signatureBundleSecret.name=fixture-bundle \
+  --set-string trust.mode=managed-key-no-tlog \
+  --set-string trust.bootstrapSecret.name=fixture-trust \
+  --set-string trust.signatureBundleSecret.name=fixture-bundle \
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   >"$fixture/cosign-rendered.yaml"
 
@@ -254,19 +254,27 @@ if helm template native-probe charts/native-plugin-runtime \
   --set-string package.manifestSHA256="$manifest_hash" \
   --set-string images.runtime=registry.invalid/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   --set-string images.oras=registry.invalid/oras@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-  --set-string trust.mode=cosign-key \
-  --set-string trust.cosign.publicKeySecret.name=fixture-trust \
+  --set-string trust.mode=managed-key-no-tlog \
+  --set-string trust.bootstrapSecret.name=fixture-trust \
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   >/dev/null 2>&1; then
-  echo "Cosign trust profile accepted a missing signature bundle Secret" >&2
+  echo "managed-key-no-tlog accepted a missing signature bundle Secret" >&2
+  exit 1
+fi
+if helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" \
+  --set-string trust.mode=managed-key-no-tlog \
+  --set-string trust.signatureBundleSecret.name=fixture-bundle \
+  --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  >/dev/null 2>&1; then
+  echo "managed-key-no-tlog accepted a missing trust bootstrap Secret" >&2
   exit 1
 fi
 
 helm template native-probe charts/native-plugin-runtime \
   "${migration_args[@]}" \
-  --set-string trust.mode=cosign-key \
-  --set-string trust.cosign.publicKeySecret.name=fixture-trust \
-  --set-string trust.cosign.signatureBundleSecret.name=fixture-bundle \
+  --set-string trust.mode=managed-key-no-tlog \
+  --set-string trust.bootstrapSecret.name=fixture-trust \
+  --set-string trust.signatureBundleSecret.name=fixture-bundle \
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   >"$fixture/cosign-migration-rendered.yaml"
 
@@ -274,40 +282,80 @@ python3 - "$fixture/cosign-rendered.yaml" "$fixture/cosign-migration-rendered.ya
 import re
 import sys
 
-expected = [
-    "fetch-package-envelope", "verify-package-envelope",
-    "verify-package-signature", "pull-package", "validate-package",
-]
+
+def blocks(section):
+    return dict(re.findall(r"^        - name: ([a-z-]+)\n((?:(?:          .*)?\n)*)", section, re.M))
+
+
+chain = ["fetch-package-envelope", "verify-package-envelope", "verify-package-publisher",
+         "verify-package-signature", "pull-package", "validate-package"]
 for path in sys.argv[1:]:
     rendered = open(path, encoding="utf-8").read()
-    init = rendered.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)[0]
-    actual = re.findall(r"^        - name: ([a-z-]+)$", init, re.M)
-    assert actual == expected, (path, actual)
-    assert "- --output=/package/oci-manifest.json" in init
-    assert "- verify-envelope" in init
-    assert "- --package-digest=sha256:" + "a" * 64 in init
-    assert "- verify-blob" in init
-    assert "- --insecure-ignore-tlog" in init
-    assert "- --bundle=/signature/oci-manifest.sigstore.json" in init
-    assert "- /package/oci-manifest.json" in init
-    assert "secretName: fixture-trust" in rendered
-    assert "secretName: fixture-bundle" in rendered
-    assert "--offline" not in rendered
-    assert "--development-untrusted" not in rendered
+    pod = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: (Deployment|Job)$", doc, re.M))
+    init, rest = pod.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)
+    main, volumes = rest.split("      volumes:\n", 1)
+    init_blocks, main_blocks = blocks(init), blocks(main)
+    assert list(init_blocks) == chain, (path, list(init_blocks))
+    for argument in ["- --output=/package/oci-manifest.json", "- verify-envelope", "- --package-digest=sha256:" + "a" * 64,
+                     "- verify-publisher", "- --trust-bootstrap=/trust/publishers.json", "- --plugin-id=dev.stellwerk.native-probe",
+                     "- --key-out=/verify/publisher.pub", "- verify-blob", "- --insecure-ignore-tlog", "- --key=/verify/publisher.pub",
+                     "- --bundle=/signature/oci-manifest.sigstore.json", "- /package/oci-manifest.json"]:
+        assert argument in init, argument
+    assert "- --trust-state=verified-local-key" in init_blocks["validate-package"]
+    assert "--installed-digest" not in pod, "no installation recorded in this render"
+    # Trust material and registry access stay in their init containers.
+    owners = {"mountPath: /trust": {"verify-package-publisher"},
+              "name: signature-bundle": {"verify-package-publisher", "verify-package-signature"},
+              "name: verify\n": {"verify-package-publisher", "verify-package-signature"},
+              "name: registry-config": {"fetch-package-envelope", "pull-package"},
+              "registry.invalid/oras": {"fetch-package-envelope", "pull-package"},
+              "registry.invalid/cosign": {"verify-package-signature"}}
+    for marker, allowed in owners.items():
+        holders = {name for name, body in {**init_blocks, **main_blocks}.items() if marker in body}
+        # registry-config exists only with a registry Secret; the rest always.
+        assert holders <= allowed and (holders == allowed or marker == "name: registry-config"), (path, marker, holders)
+    assert re.search(r"- name: verify\n\s+mountPath: /verify\n\s+readOnly: true", init_blocks["verify-package-signature"])
+    verify_volume = re.search(r"^        - name: verify\n((?:          .*\n)+)", volumes, re.M)
+    assert verify_volume and "medium: Memory" in verify_volume.group(1)
+    assert "secretName: fixture-trust" in volumes and "secretName: fixture-bundle" in volumes
+    assert "--offline" not in rendered and "--development-untrusted" not in rendered
 PY
 
-# Without signature trust the package layout is still checked before the pull.
+# An installer records the installed digest; only the gate receives it.
+installed_args=("${migration_args[@]}" --set-string trust.mode=managed-key-no-tlog
+  --set-string trust.bootstrapSecret.name=fixture-trust --set-string trust.signatureBundleSecret.name=fixture-bundle
+  --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd)
+helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" \
+  --set-string package.installedDigest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$fixture/installed.yaml"
+test "$(grep -c -- '--installed-digest=' "$fixture/installed.yaml")" -eq 1
+python3 - "$fixture/installed.yaml" <<'PY'
+import sys
+gate = open(sys.argv[1], encoding="utf-8").read().split("        - name: verify-package-publisher\n", 1)[1].split("        - name:", 1)[0]
+assert "- --installed-digest=sha256:" + "a" * 64 in gate
+PY
+for invalid in sha256:ABC "sha256:$(printf 'a%.0s' {1..63})" "md5:$(printf 'a%.0s' {1..32})"; do
+  if helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" \
+    --set-string "package.installedDigest=$invalid" >/dev/null 2>&1; then
+    echo "chart accepted the installed digest $invalid" >&2
+    exit 1
+  fi
+done
+
+# Without signature trust the package layout is still checked before the pull,
+# and nothing skips a transparency log.
 python3 - "$fixture/rendered.yaml" "$fixture/migration-rendered.yaml" <<'PY'
 import re
 import sys
 
-expected = ["fetch-package-envelope", "verify-package-envelope", "pull-package", "validate-package"]
 for path in sys.argv[1:]:
     rendered = open(path, encoding="utf-8").read()
-    init = rendered.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)[0]
-    actual = re.findall(r"^        - name: ([a-z-]+)$", init, re.M)
-    assert actual == expected, (path, actual)
-    assert "- verify-envelope" in init and "- verify-blob" not in init
+    pod = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: (Deployment|Job)$", doc, re.M))
+    init = pod.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)[0]
+    assert re.findall(r"^        - name: ([a-z-]+)$", init, re.M) == [
+        "fetch-package-envelope", "verify-package-envelope", "pull-package", "validate-package"], (path, init)
+    assert "- verify-envelope" in init
+    for forbidden in ["- verify-blob", "- verify-publisher", "insecure-ignore-tlog", "- name: trust\n", "- name: verify\n"]:
+        assert forbidden not in rendered, (path, forbidden)
 PY
 
 # Pod hardening: every Secret volume is 0440, plugin state is bounded and no
@@ -320,9 +368,9 @@ helm template native-probe charts/native-plugin-runtime \
   --set-string package.manifestSHA256="$manifest_hash" \
   --set-string images.runtime=registry.invalid/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   --set-string images.oras=registry.invalid/oras@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-  --set-string trust.mode=cosign-key \
-  --set-string trust.cosign.publicKeySecret.name=fixture-trust \
-  --set-string trust.cosign.signatureBundleSecret.name=fixture-bundle \
+  --set-string trust.mode=managed-key-no-tlog \
+  --set-string trust.bootstrapSecret.name=fixture-trust \
+  --set-string trust.signatureBundleSecret.name=fixture-bundle \
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   --set-string package.registryConfigSecret.name=registry-pull \
   --set-json 'pluginSecretFiles=[{"name":"plugin-profile","secretName":"operator-plugin-profile","mountPath":"/run/secrets/profile","items":[{"key":"profile.json","path":"profile.json"}]}]' \
@@ -333,7 +381,9 @@ import sys
 
 for path in sys.argv[1:]:
     rendered = open(path, encoding="utf-8").read()
-    pod = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: (Deployment|Job)$", doc, re.M))
+    pods = [doc for doc in rendered.split("\n---") if re.search(r"^kind: (Deployment|Job)$", doc, re.M)]
+    assert len(pods) == 1, path
+    pod = pods[0]
     assert "      enableServiceLinks: false\n" in pod, path
     assert "      automountServiceAccountToken: false\n" in pod, path
     secrets = re.findall(r"^          secret:\n((?:            .*\n)+)", pod, re.M)
@@ -342,6 +392,8 @@ for path in sys.argv[1:]:
         assert "            defaultMode: 0440\n" in volume, (path, volume)
     state = re.search(r"^        - name: state\n((?:          .*\n)+)", pod, re.M)
     assert state and "emptyDir:" in state.group(1) and "sizeLimit: 128Mi" in state.group(1), (path, state)
+    package = re.search(r"^        - name: package\n((?:          .*\n)+)", pod, re.M)
+    assert package and "emptyDir:" in package.group(1) and "sizeLimit: 640Mi" in package.group(1), (path, package)
 PY
 
 package_output="$fixture/package-output"
@@ -390,7 +442,7 @@ assert "readOnly: true" in ui and "readOnlyRootFilesystem: true" in ui
 assert deployment.count("scheme: HTTPS") == 3
 service = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: Service$", doc, re.M))
 assert "targetPort: ui" in service
-policy = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: NetworkPolicy$", doc, re.M))
+policy = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: NetworkPolicy$", doc, re.M) and "\n  name: native-ui-native-plugin-runtime\n" in doc)
 assert "gateway.envoyproxy.io/owning-gateway-name: native-plugin-ui" in policy
 assert "port: 8081" in policy
 assert "kind: Gateway" in rendered and "kind: Certificate" in rendered
@@ -499,5 +551,83 @@ if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" --
   echo "chart rendered the native token sidecar for Kubernetes 1.28" >&2
   exit 1
 fi
+
+# Fetch isolation: registry credentials and ORAS stay in the fetch init
+# containers, and Pod egress reaches only the configured mirror endpoints.
+# NetworkPolicy is per Pod, so the plugin can reach those endpoints but holds
+# no credentials. Broad rules are refused.
+mirrors='[{"cidr":"203.0.113.10/32","port":5000},{"namespaceSelector":{"kubernetes.io/metadata.name":"registry-mirror"},"podSelector":{"app.kubernetes.io/name":"mirror"},"port":5000}]'
+helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
+  --set-string package.registryConfigSecret.name=registry-pull \
+  --set-json "networkPolicy.registryMirrors=$mirrors" >"$fixture/egress-runtime.yaml"
+helm template native-ui charts/native-plugin-runtime "${migration_args[@]}" \
+  --set-string package.registryConfigSecret.name=registry-pull \
+  --set-json "networkPolicy.registryMirrors=$mirrors" >"$fixture/egress-migration.yaml"
+python3 - "$fixture/egress-runtime.yaml" "$fixture/egress-migration.yaml" "$fixture/workload.yaml" <<'PY'
+import re
+import sys
+
+for path in sys.argv[1:]:
+    configured = "egress-" in path
+    documents = open(path, encoding="utf-8").read().split("\n---")
+    policies = [doc for doc in documents if re.search(r"^kind: NetworkPolicy$", doc, re.M)]
+    assert len(policies) == 1, path
+    egress = policies[0].split("  egress:\n", 1)[1]
+    rules = re.split(r"(?m)^    - to:\n", egress)[1:]
+    assert rules, path
+    for rule in rules:
+        assert "      ports:\n" in rule, (path, "an egress rule without ports")
+        for cidr in re.findall(r"cidr: \"?([^\"\n]+)\"?", rule):
+            assert cidr == "203.0.113.10/32", (path, f"egress to {cidr}")
+    mirror_rules = [rule for rule in rules if "203.0.113.10/32" in rule or "registry-mirror" in rule]
+    assert len(mirror_rules) == (2 if configured else 0), (path, len(mirror_rules))
+    for rule in mirror_rules:
+        assert "port: 5000" in rule
+    if "registry-mirror" in egress:
+        peer = egress.split("kubernetes.io/metadata.name: registry-mirror", 1)[1].split("      ports:", 1)[0]
+        assert "podSelector:" in peer and "app.kubernetes.io/name: mirror" in peer
+    pod = next(doc for doc in documents if re.search(r"^kind: (Deployment|Job)$", doc, re.M))
+    init, main = pod.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)
+    main = main.split("      volumes:\n", 1)[0]
+    for marker in ["registry-config", "registry.invalid/oras", "--registry-config", "pull-package", "/trust", "signature-bundle"]:
+        assert marker not in main, (path, marker)
+    if configured:
+        assert "secretName: registry-pull" in pod and "registry-config" in init
+        for name, body in re.findall(r"^        - name: ([a-z-]+)\n((?:(?:          .*)?\n)*)", init, re.M):
+            assert ("name: registry-config" in body) == (name in {"fetch-package-envelope", "pull-package"}), (path, name)
+PY
+for broad in '[{"cidr":"0.0.0.0/0","port":443}]' '[{"cidr":"10.0.0.0/8","port":443}]' '[{"cidr":"203.0.113.10/32"}]' \
+  '[{"namespaceSelector":{"kubernetes.io/metadata.name":"registry-mirror"},"port":5000}]' \
+  '[{"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}]}]' '[{"cidr":"::/0","port":443}]'; do
+  if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
+    --set-json "networkPolicy.registryMirrors=$broad" >/dev/null 2>&1; then
+    echo "chart accepted the broad registry rule $broad" >&2
+    exit 1
+  fi
+done
+
+# Every rendered profile: args and command entries are single list items. A
+# deeper-indented entry would fold into the previous argument and still be
+# valid YAML.
+python3 - "$fixture"/*.yaml <<'PY'
+import re
+import sys
+
+# A list item indented deeper than its siblings folds into the previous
+# scalar: still valid YAML, but the container gets one merged argument.
+for path in sys.argv[1:]:
+    lines = open(path, encoding="utf-8").read().split("\n")
+    for number, line in enumerate(lines):
+        key = re.match(r"^( *)(?:- )?(args|command):$", line)
+        if not key:
+            continue
+        base = len(line) - len(line.lstrip()) + (2 if line.lstrip().startswith("- ") else 0)
+        following = number + 1
+        while following < len(lines) and lines[following].strip() and len(lines[following]) - len(lines[following].lstrip()) > base:
+            item = lines[following]
+            assert item.lstrip().startswith("- ") and len(item) - len(item.lstrip()) == base + 2, \
+                f"{path}:{following + 1}: {key.group(2)} entry is not a single list item: {item.strip()[:60]}"
+            following += 1
+PY
 
 echo "All native runtime, package and chart checks passed."

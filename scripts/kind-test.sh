@@ -99,7 +99,7 @@ manifest_v2="$(printf '%s\n' "$package_v2" | sed -n '1p')"; digest_v2="$(printf 
 checks+=("two independently packaged OCI versions")
 
 registry_ip="$(docker inspect --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$registry")"
-additional_egress="[{\"to\":[{\"ipBlock\":{\"cidr\":\"$registry_ip/32\"}}],\"ports\":[{\"protocol\":\"TCP\",\"port\":5000}]}]"
+registry_mirrors="[{\"cidr\":\"$registry_ip/32\",\"port\":5000}]"
 
 helm_apply() {
   local version="$1" digest="$2" manifest="$3"
@@ -116,13 +116,13 @@ helm_apply() {
     --set package.plainHTTP=true \
     --set-string images.runtime="$runtime_reference" \
     --set-string images.oras="$oras_reference" \
-    --set-json networkPolicy.additionalEgress="$additional_egress" >/dev/null
+    --set-json networkPolicy.registryMirrors="$registry_mirrors" >/dev/null
 }
 
 helm_apply 1.0.0 "$digest_v1" "$manifest_v1"
 kube --namespace "$namespace" rollout status deployment/native-probe-native-plugin-runtime --timeout=90s >/dev/null
 runtime_before="$(kube --namespace "$namespace" get pod -l app.kubernetes.io/instance="$release" -o jsonpath='{.items[0].spec.containers[0].image}')"
-checks+=("Helm install and ORAS init pull")
+checks+=("Helm install, init-container package fetch and mirror-only registry egress")
 
 probe_port="$(random_port)"
 kube --namespace "$namespace" port-forward service/native-probe-native-plugin-runtime "$probe_port:8080" >"$workspace/port-forward.log" 2>&1 &

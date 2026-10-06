@@ -58,26 +58,35 @@ package:
   reference: ""
   manifestSHA256: ""
   plainHTTP: false
-  # Optional dockerconfigjson Secret. It is mounted only into init containers.
+  # Digest an existing installation recorded (set by the installer after the
+  # first successful install). Re-fetching exactly this digest keeps verifying
+  # after the signing key's validity window ended; revocation still blocks it.
+  # Any other digest is a new installation and needs a currently valid key.
+  installedDigest: ""
+  # Optional dockerconfigjson Secret for the registry (usually the customer's
+  # mirror). Mounted only into the ORAS fetch init containers.
   registryConfigSecret:
     name: ""
     key: .dockerconfigjson
 
 trust:
-  # Required for an enabled installation, there is no default: cosign-key, or
-  # development-untrusted for local development. The development profile is
-  # visible to the plugin and must never be presented as production
-  # verification.
+  # Required for an enabled installation, there is no default:
+  # managed-key-no-tlog, or development-untrusted for local development. The
+  # development profile is visible to the plugin and must never be presented
+  # as production verification.
   mode: ""
-  cosign:
-    publicKeySecret:
-      name: ""
-      key: cosign.pub
-    # Operator-provided bundle from sign-layout-manifest.sh. It signs the
-    # exact OCI manifest whose digest is pinned in package.reference.
-    signatureBundleSecret:
-      name: ""
-      key: oci-manifest.sigstore.json
+  # Authentic trust bootstrap (publishers.json): publishers, their policy,
+  # plugin IDs, pinned keys with validity and the revokedKeyIds compromise
+  # list. Delivered by the operator, never taken from a package. Mounted only
+  # into the verify-package-publisher init container.
+  bootstrapSecret:
+    name: ""
+    key: publishers.json
+  # Detached Sigstore bundle from sign-layout-manifest.sh over the exact OCI
+  # manifest whose digest is pinned in package.reference.
+  signatureBundleSecret:
+    name: ""
+    key: oci-manifest.sigstore.json
 
 images:
   # Enabled installations require immutable @sha256 references.
@@ -139,8 +148,10 @@ initResources:
     cpu: 500m
     memory: 256Mi
 
+# Every replica fetches its own copy into this emptyDir; the plugin and UI
+# mount it read-only. The limit covers the largest package the envelope admits.
 packageVolume:
-  sizeLimit: 512Mi
+  sizeLimit: 640Mi
 
 # Bounds the plugin state emptyDir used when persistence is disabled, and the
 # migration Job's state directory.
@@ -218,8 +229,12 @@ networkPolicy:
       kubernetes.io/metadata.name: kube-system
     podSelector:
       k8s-app: kube-dns
-  # ORAS package pulls require an operator-specific registry rule here. No
-  # public-registry CIDR is broad enough to be a safe chart default.
+  # The customer's registry mirror endpoints for the fetch init containers.
+  # Each entry is one address ({cidr: 192.0.2.10/32, port: 443}) or an exact
+  # in-cluster peer ({namespaceSelector: {...}, podSelector: {...}, port: 5000}).
+  # Nothing is open by default, so fetching fails closed until set. The rule
+  # is Pod-wide: the plugin can reach these endpoints but holds no credentials.
+  registryMirrors: []
   additionalIngress: []
   additionalEgress: []
 

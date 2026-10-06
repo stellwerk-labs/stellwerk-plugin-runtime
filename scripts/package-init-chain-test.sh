@@ -62,12 +62,54 @@ if cmp -s "$workspace/approved/cosign.pub" "$workspace/wrong/cosign.pub"; then
   exit 1
 fi
 COSIGN_PASSWORD='' quiet "$root/scripts/sign-layout-manifest.sh" "$workspace/source" "$workspace/approved/cosign.key"
+# The publisher's SBOM generator is outside this repository; a minimal SPDX 2
+# document of the package stands in for its output.
+sbom_fixture() {
+  jq -n --arg version "$2" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+    spdxVersion: "SPDX-2.3", dataLicense: "CC0-1.0", SPDXID: "SPDXRef-DOCUMENT",
+    name: ("native-probe-" + $version), documentNamespace: ("https://spdx.example.test/native-probe/" + $version),
+    creationInfo: {created: $created, creators: ["Tool: package-init-chain-test"]},
+    packages: [{SPDXID: "SPDXRef-Package", name: "native-probe", versionInfo: $version,
+                downloadLocation: "NOASSERTION", filesAnalyzed: false}],
+    relationships: [{spdxElementId: "SPDXRef-DOCUMENT", relationshipType: "DESCRIBES", relatedSpdxElement: "SPDXRef-Package"}]}' >"$1"
+}
+sbom_fixture "$workspace/sbom-1.0.0.spdx.json" 1.0.0
+COSIGN_PASSWORD='' quiet "$root/scripts/attest-layout-manifest.sh" "$workspace/source" "$workspace/approved/cosign.key" \
+  "$workspace/sbom-1.0.0.spdx.json"
+# Another release of the same publisher: its genuine SBOM must not pass for
+# this package.
+"$root/scripts/build-package.sh" 1.0.1 "$workspace/other" >/dev/null
+sbom_fixture "$workspace/sbom-1.0.1.spdx.json" 1.0.1
+COSIGN_PASSWORD='' quiet "$root/scripts/attest-layout-manifest.sh" "$workspace/other" "$workspace/approved/cosign.key" \
+  "$workspace/sbom-1.0.1.spdx.json"
+# Forged parts derived from the genuine bundles: the SBOM with its signature
+# stripped, and the provenance with another commit under the original signature.
+mkdir -p "$workspace/forged/unsigned" "$workspace/forged/tampered"
+python3 - "$workspace/source/attestations" "$workspace/forged" <<'PY'
+import base64
+import json
+import sys
+
+source, forged = sys.argv[1:]
+unsigned = json.load(open(f"{source}/sbom.sigstore.json", encoding="utf-8"))
+unsigned["dsseEnvelope"]["signatures"] = []
+tampered = json.load(open(f"{source}/provenance.sigstore.json", encoding="utf-8"))
+statement = json.loads(base64.b64decode(tampered["dsseEnvelope"]["payload"]))
+statement["predicate"]["sources"][0]["commit"] = "0" * 40
+tampered["dsseEnvelope"]["payload"] = base64.b64encode(json.dumps(statement).encode()).decode()
+json.dump(unsigned, open(f"{forged}/unsigned/sbom.sigstore.json", "w", encoding="utf-8"))
+json.dump(tampered, open(f"{forged}/tampered/provenance.sigstore.json", "w", encoding="utf-8"))
+PY
 
 # Offline transfer: bundle, unpack elsewhere, verify before anything is pushed.
 "$root/scripts/offline-bundle.sh" "$workspace/source" "$workspace/bundle.tar" >/dev/null
 mkdir "$workspace/transfer"
 tar -C "$workspace/transfer" -xf "$workspace/bundle.tar"
-quiet "$root/scripts/verify-layout-manifest.sh" "$workspace/transfer" "$workspace/approved/cosign.pub"
+if ! output="$("$root/scripts/verify-layout-manifest.sh" "$workspace/transfer" "$workspace/approved/cosign.pub" 2>&1)" ||
+  [[ "$output" != *"Offline signature, 2 attestations and OCI content verified."* ]]; then
+  printf 'offline verification of the signed and attested package failed: %s\n' "$output" >&2
+  exit 1
+fi
 if "$root/scripts/verify-layout-manifest.sh" "$workspace/transfer" "$workspace/wrong/cosign.pub" >/dev/null 2>&1; then
   echo "offline verification accepted the wrong public key" >&2
   exit 1
@@ -89,10 +131,29 @@ manifest_hash="$(jq -er '.manifestSHA256 | select(test("^[0-9a-f]{64}$"))' "$rel
 plugin_id="$(jq -er '.pluginId' "$release")"
 plugin_version="$(jq -er '.pluginVersion' "$release")"
 test "sha256:$(shasum -a 256 "$workspace/transfer/oci-manifest.json" | awk '{print $1}')" = "$digest"
+# A forged provenance referrer, consistently re-digested into the layout and
+# release metadata, is caught by its DSSE signature alone.
+cp -R "$workspace/transfer" "$workspace/transfer-forged"
+chmod -R u+w "$workspace/transfer-forged"
+forged_referrer="$(attach_bundle "$workspace/transfer-forged/oci-layout@$digest" \
+  "$workspace/forged/tampered/provenance.sigstore.json" "$provenance_predicate_type" --oci-layout)"
+jq --arg digest "$forged_referrer" '.attestations.provenance.digest = $digest' "$release" >"$workspace/transfer-forged/release.json"
+jq --arg digest "$(jq -er .attestations.provenance.digest "$release")" '.manifests |= map(select(.digest != $digest))' \
+  "$workspace/transfer-forged/oci-layout/index.json" >"$workspace/forged/index.json"
+mv -- "$workspace/forged/index.json" "$workspace/transfer-forged/oci-layout/index.json"
+if output="$("$root/scripts/verify-layout-manifest.sh" "$workspace/transfer-forged" "$workspace/approved/cosign.pub" 2>&1)"; then
+  echo "offline verification accepted a forged provenance attestation" >&2
+  exit 1
+fi
+if [[ "$output" != *"the provenance attestation does not verify"* ]]; then
+  echo "offline verification refused the forged provenance for the wrong reason: $output" >&2
+  exit 1
+fi
 
 mkdir -m 0777 "$workspace/package" "$workspace/tampered" "$workspace/wrong-key"
 mkdir -m 0755 "$workspace/trust" "$workspace/trust-sigstore" "$workspace/trust-wrong" "$workspace/signature"
 mkdir -m 0777 "$workspace/verify" "$workspace/verify-refused"
+mkdir -m 0777 "$workspace/attestations" "$workspace/unsigned" "$workspace/foreign-subject" "$workspace/tampered-provenance"
 # Operator trust bootstraps: the approved key under managed-key-no-tlog, the
 # same key under the default sigstore policy, and a foreign key.
 bootstrap() {
@@ -116,15 +177,39 @@ bootstrap "$workspace/trust-wrong/publishers.json" managed-key-no-tlog "$workspa
 cp "$workspace/wrong/cosign.pub" "$workspace/trust/wrong.pub"
 cp "$workspace/transfer/oci-manifest.sigstore.json" "$workspace/signature/oci-manifest.sigstore.json"
 chmod 0444 "$workspace/trust/"* "$workspace/trust-sigstore/"* "$workspace/trust-wrong/"* "$workspace/signature/oci-manifest.sigstore.json"
+# publisher_gate TRUST VERIFY ATTESTATIONS [NAME...] runs the chart's gate
+# with the attestation bundle of each NAME fetched into ATTESTATIONS.
 publisher_gate() {
-  local trust="$1" verify="$2"
+  local trust="$1" verify="$2" attestations="$3" bundles=() name
+  shift 3
+  for name in "$@"; do
+    bundles+=("--$name-bundle=/attestations/$name/$name.sigstore.json")
+  done
   timeout -k 5s 30s docker run "${container_base[@]}" --network none \
     --mount "type=bind,src=$workspace/package,dst=/package,readonly" \
     --mount "type=bind,src=$workspace/$trust,dst=/trust,readonly" \
     --mount "type=bind,src=$workspace/signature,dst=/signature,readonly" \
+    --mount "type=bind,src=$workspace/$attestations,dst=/attestations,readonly" \
     --mount "type=bind,src=$workspace/$verify,dst=/verify" "$runtime_image" \
     verify-publisher --trust-bootstrap=/trust/publishers.json --bundle=/signature/oci-manifest.sigstore.json \
-    --oci-manifest=/package/oci-manifest.json --plugin-id="$plugin_id" --key-out=/verify/publisher.pub
+    ${bundles[@]+"${bundles[@]}"} --oci-manifest=/package/oci-manifest.json --plugin-id="$plugin_id" --key-dir=/verify
+}
+# fetch_attestation ATTESTATIONS NAME REFERRER is the chart's attestation
+# fetch: ORAS pulls a referrer from the package repository by digest.
+fetch_attestation() {
+  timeout -k 5s 45s docker run "${container_base[@]}" --network "container:$registry" \
+    --mount "type=bind,src=$workspace/$1,dst=/attestations" "$oras_image" \
+    pull --no-tty --output="/attestations/$2" --plain-http "localhost:5000/native-probe@$3" >/dev/null
+}
+# cosign_attestation ATTESTATIONS NAME PREDICATE_TYPE is the chart's Cosign
+# check of one attestation with the key the gate wrote.
+cosign_attestation() {
+  timeout -k 5s 45s docker run "${container_base[@]}" --network none \
+    --mount "type=bind,src=$workspace/package,dst=/package,readonly" \
+    --mount "type=bind,src=$workspace/verify,dst=/verify,readonly" \
+    --mount "type=bind,src=$workspace/$1,dst=/attestations,readonly" "$cosign_image" \
+    verify-blob-attestation --insecure-ignore-tlog --key="/verify/$2.pub" --type="$3" \
+    --bundle="/attestations/$2/$2.sigstore.json" /package/oci-manifest.json
 }
 
 timeout -k 5s 30s docker run --detach --pull=never --name "$registry" \
@@ -138,9 +223,20 @@ for _ in {1..30}; do
 done
 curl --fail --silent --max-time 2 "http://$registry_address/v2/" >/dev/null
 host_reference="$registry_address/native-probe:$plugin_version"
-timeout -k 5s 60s oras cp --from-oci-layout --to-plain-http \
+timeout -k 5s 60s oras cp -r --from-oci-layout --to-plain-http \
   "$workspace/transfer/oci-layout:$plugin_version" "$host_reference" >/dev/null
 test "$(timeout -k 5s 30s oras resolve --plain-http "$host_reference")" = "$digest"
+# The recorded attestation referrers travelled with the package.
+test "$(timeout -k 5s 30s oras discover --plain-http --format json "$host_reference" | jq -c '[.referrers[].digest] | sort')" = \
+  "$(jq -c '[.attestations[].digest] | sort' "$release")"
+timeout -k 5s 60s oras cp -r --from-oci-layout --to-plain-http \
+  "$workspace/other/oci-layout:1.0.1" "$registry_address/native-probe:1.0.1" >/dev/null
+# Whoever can push to the repository can attach referrers; these two forged
+# ones now sit next to the genuine attestations.
+unsigned_referrer="$(attach_bundle "$registry_address/native-probe@$digest" \
+  "$workspace/forged/unsigned/sbom.sigstore.json" "$sbom_predicate_type" --plain-http)"
+tampered_referrer="$(attach_bundle "$registry_address/native-probe@$digest" \
+  "$workspace/forged/tampered/provenance.sigstore.json" "$provenance_predicate_type" --plain-http)"
 container_reference="localhost:5000/native-probe@$digest"
 
 container_base=(--rm --pull=never --platform "$platform" --user 65532:65532 --read-only --cap-drop ALL
@@ -160,28 +256,56 @@ timeout -k 5s 30s docker run "${container_base[@]}" --network none \
   --mount "type=bind,src=$workspace/package,dst=/package,readonly" "$runtime_image" \
   verify-envelope --oci-manifest=/package/oci-manifest.json \
   --package-digest="$digest" --manifest-sha256="$manifest_hash" >/dev/null
-# managed-key-no-tlog: the runtime gate checks the bootstrap policy and the
-# signature offline and hands only the pinned key to Cosign, which verifies
-# the same bytes again. The same signature fails for a publisher pinned with
-# the default sigstore policy and for a bootstrap pinning another key.
-publisher_gate trust verify >/dev/null
-for refused in "trust-sigstore:requires transparency-log verification" "trust-wrong:does not pin"; do
-  if output="$(publisher_gate "${refused%%:*}" verify-refused 2>&1)"; then
-    echo "the publisher gate accepted ${refused%%:*}" >&2
-    exit 1
-  fi
-  if [[ "$output" != *"${refused#*:}"* ]]; then
-    echo "the publisher gate refused ${refused%%:*} for the wrong reason: $output" >&2
-    exit 1
-  fi
-done
-test ! -e "$workspace/verify-refused/publisher.pub"
+# managed-key-no-tlog: the runtime gate checks the bootstrap policy, the
+# signature and the SBOM and provenance attestations offline as one release
+# set and hands only the pinned keys to Cosign, which verifies each part again.
+fetch_attestation attestations sbom "$(jq -er .attestations.sbom.digest "$release")"
+fetch_attestation attestations provenance "$(jq -er .attestations.provenance.digest "$release")"
+publisher_gate trust verify attestations sbom provenance >/dev/null
 quiet timeout -k 5s 45s docker run "${container_base[@]}" --network none \
   --mount "type=bind,src=$workspace/package,dst=/package,readonly" \
   --mount "type=bind,src=$workspace/verify,dst=/verify,readonly" \
   --mount "type=bind,src=$workspace/signature,dst=/signature,readonly" "$cosign_image" \
-  verify-blob --insecure-ignore-tlog --key=/verify/publisher.pub \
+  verify-blob --insecure-ignore-tlog --key=/verify/package.pub \
   --bundle=/signature/oci-manifest.sigstore.json /package/oci-manifest.json
+quiet cosign_attestation attestations sbom "$sbom_predicate_type"
+quiet cosign_attestation attestations provenance "$provenance_predicate_type"
+# Release set negatives, each part fetched through the chart's ORAS stage. The
+# gate refuses for exactly the expected reason and writes no key.
+cp -R "$workspace/attestations/provenance" "$workspace/unsigned/"
+cp -R "$workspace/attestations/provenance" "$workspace/foreign-subject/"
+cp -R "$workspace/attestations/sbom" "$workspace/tampered-provenance/"
+fetch_attestation unsigned sbom "$unsigned_referrer"
+fetch_attestation foreign-subject sbom "$(jq -er .attestations.sbom.digest "$workspace/other/release.json")"
+fetch_attestation tampered-provenance provenance "$tampered_referrer"
+for refused in \
+  "trust-sigstore|attestations|sbom provenance|requires transparency-log verification" \
+  "trust-wrong|attestations|sbom provenance|does not pin" \
+  "trust|attestations|provenance|requires a signed SBOM attestation for this package; none was supplied" \
+  "trust|unsigned|sbom provenance|the SBOM attestation must be one signed in-toto DSSE envelope" \
+  "trust|foreign-subject|sbom provenance|the SBOM attestation is about another artifact, not this package digest" \
+  "trust|tampered-provenance|sbom provenance|the provenance attestation signature does not verify"; do
+  IFS='|' read -r trust attestations names reason <<<"$refused"
+  # shellcheck disable=SC2086 # names is a list of attestation names
+  if output="$(publisher_gate "$trust" verify-refused "$attestations" $names 2>&1)"; then
+    echo "the publisher gate accepted $trust with $attestations ($names)" >&2
+    exit 1
+  fi
+  if [[ "$output" != *"$reason"* ]]; then
+    echo "the publisher gate refused $trust with $attestations for the wrong reason: $output" >&2
+    exit 1
+  fi
+done
+test -z "$(ls -A "$workspace/verify-refused")"
+# Cosign, holding the genuine keys, refuses the forged parts on its own too.
+for forged in "unsigned|sbom|$sbom_predicate_type" "foreign-subject|sbom|$sbom_predicate_type" \
+  "tampered-provenance|provenance|$provenance_predicate_type"; do
+  IFS='|' read -r attestations name predicate_type <<<"$forged"
+  if cosign_attestation "$attestations" "$name" "$predicate_type" >/dev/null 2>&1; then
+    echo "Cosign accepted the $name attestation from $attestations" >&2
+    exit 1
+  fi
+done
 timeout -k 5s 60s docker run "${container_base[@]}" --network "container:$registry" \
   --mount "type=bind,src=$workspace/package,dst=/package" "$oras_image" \
   pull --no-tty --output=/package --plain-http "$container_reference" >/dev/null
@@ -284,4 +408,4 @@ for case_name in tampered wrong-key; do
   fi
 done
 
-echo "Signed package init chain passed: $digest ($platform); managed-key-no-tlog gate and Cosign verified offline, verified package ran; default-policy publisher, foreign key, tampered manifest/blob, archive layer and wrong key fail closed."
+echo "Signed package init chain passed: $digest ($platform); managed-key-no-tlog release set (signature, SBOM, provenance) verified offline by the gate and Cosign, verified package ran; default-policy publisher, foreign key, missing/unsigned/foreign-subject SBOM, tampered provenance (registry and offline), tampered manifest/blob, archive layer and wrong key fail closed."

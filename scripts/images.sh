@@ -7,6 +7,12 @@ registry_image=registry@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8
 # kind node image for kind v0.33. KIND_NODE_IMAGE overrides it for other kind versions.
 kind_node_image=kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed # Kubernetes v1.36.4
 
+# Release set attestations: Sigstore bundles attached as OCI referrers of the
+# package manifest, following Cosign's bundle referrer convention.
+sigstore_bundle_type=application/vnd.dev.sigstore.bundle.v0.3+json
+sbom_predicate_type=https://spdx.dev/Document
+provenance_predicate_type=https://stellwerk.dev/attestation/source-provenance/v1
+
 # docker_platform prints the daemon platform as linux/amd64 or linux/arm64.
 docker_platform() {
   case "$(docker info --format '{{.OSType}}/{{.Architecture}}')" in
@@ -41,4 +47,20 @@ offline_cosign() {
     --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --env HOME=/tmp --env COSIGN_PASSWORD \
     ${docker_args[@]+"${docker_args[@]}"} "$cosign_image" "$@"
+}
+
+# attach_bundle SUBJECT BUNDLE PREDICATE_TYPE [ORAS_FLAGS...] attaches a
+# Sigstore bundle file as an OCI referrer of SUBJECT (an absolute layout path
+# or a registry reference, with digest) and prints the referrer manifest
+# digest. The layer is titled with the bundle's file name.
+attach_bundle() {
+  local subject="$1" bundle="$2" predicate_type="$3"
+  shift 3
+  (
+    cd "$(dirname "$bundle")" || exit 1
+    timeout -k 5s 60s oras attach "$@" --artifact-type "$sigstore_bundle_type" \
+      --annotation dev.sigstore.bundle.content=dsse-envelope \
+      --annotation "dev.sigstore.bundle.predicateType=$predicate_type" --format json \
+      "$subject" "$(basename "$bundle"):$sigstore_bundle_type" | jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))'
+  )
 }

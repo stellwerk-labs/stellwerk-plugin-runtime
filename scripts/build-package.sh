@@ -7,6 +7,8 @@ output="${2:?usage: build-package.sh VERSION OUTPUT_DIRECTORY}"
 
 command -v oras >/dev/null || { echo "oras is required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
+commit="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null)" ||
+  { echo "the source provenance needs a git checkout" >&2; exit 1; }
 
 case "$output" in
   "$root"|/|"") echo "refusing unsafe output directory" >&2; exit 1 ;;
@@ -38,5 +40,16 @@ jq -n \
   --arg trustState untrusted-development \
   '{schemaVersion:1,pluginId:$pluginId,pluginVersion:$pluginVersion,packageDigest:$packageDigest,manifestSHA256:$manifestSHA256,trustState:$trustState}' \
   >"$output/release.json"
+# Source provenance (https://stellwerk.dev/attestation/source-provenance/v1):
+# the exact commit this package was built from and whether the worktree held
+# uncommitted changes. attest-layout-manifest.sh signs it as an attestation
+# about the package digest.
+dirty=false
+if [ -n "$(git -C "$root" status --porcelain)" ]; then
+  dirty=true
+fi
+jq -n --arg commit "$commit" --argjson dirty "$dirty" --arg go "$(go env GOVERSION)" \
+  '{schemaVersion:1,sources:[{path:".",commit:$commit,dirty:$dirty}],tools:{go:$go}}' \
+  >"$output/source-provenance.json"
 
 echo "$output/release.json"

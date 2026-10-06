@@ -243,6 +243,8 @@ helm template native-probe charts/native-plugin-runtime \
   --set-string trust.bootstrapSecret.name=fixture-trust \
   --set-string trust.signatureBundleSecret.name=fixture-bundle \
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --set-string package.attestations.sbom=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  --set-string package.attestations.provenance=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   >"$fixture/cosign-rendered.yaml"
 
 if helm template native-probe charts/native-plugin-runtime \
@@ -276,6 +278,8 @@ helm template native-probe charts/native-plugin-runtime \
   --set-string trust.bootstrapSecret.name=fixture-trust \
   --set-string trust.signatureBundleSecret.name=fixture-bundle \
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --set-string package.attestations.sbom=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  --set-string package.attestations.provenance=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
   >"$fixture/cosign-migration-rendered.yaml"
 
 python3 - "$fixture/cosign-rendered.yaml" "$fixture/cosign-migration-rendered.yaml" <<'PY'
@@ -287,8 +291,11 @@ def blocks(section):
     return dict(re.findall(r"^        - name: ([a-z-]+)\n((?:(?:          .*)?\n)*)", section, re.M))
 
 
-chain = ["fetch-package-envelope", "verify-package-envelope", "verify-package-publisher",
-         "verify-package-signature", "pull-package", "validate-package"]
+chain = ["fetch-package-envelope", "verify-package-envelope", "fetch-package-sbom", "fetch-package-provenance",
+         "verify-package-publisher", "verify-package-signature", "verify-package-sbom", "verify-package-provenance",
+         "pull-package", "validate-package"]
+predicate_types = {"sbom": "https://spdx.dev/Document", "provenance": "https://stellwerk.dev/attestation/source-provenance/v1"}
+referrers = {"sbom": "sha256:" + "e" * 64, "provenance": "sha256:" + "f" * 64}
 for path in sys.argv[1:]:
     rendered = open(path, encoding="utf-8").read()
     pod = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: (Deployment|Job)$", doc, re.M))
@@ -298,25 +305,43 @@ for path in sys.argv[1:]:
     assert list(init_blocks) == chain, (path, list(init_blocks))
     for argument in ["- --output=/package/oci-manifest.json", "- verify-envelope", "- --package-digest=sha256:" + "a" * 64,
                      "- verify-publisher", "- --trust-bootstrap=/trust/publishers.json", "- --plugin-id=dev.stellwerk.native-probe",
-                     "- --key-out=/verify/publisher.pub", "- verify-blob", "- --insecure-ignore-tlog", "- --key=/verify/publisher.pub",
+                     "- --key-dir=/verify", "- verify-blob", "- --insecure-ignore-tlog", "- --key=/verify/package.pub",
                      "- --bundle=/signature/oci-manifest.sigstore.json", "- /package/oci-manifest.json"]:
         assert argument in init, argument
+    gate = init_blocks["verify-package-publisher"]
+    for name, predicate_type in predicate_types.items():
+        bundle = f"/attestations/{name}/{name}.sigstore.json"
+        fetch, cosign = init_blocks[f"fetch-package-{name}"], init_blocks[f"verify-package-{name}"]
+        for argument in ["- pull", f"- --output=/attestations/{name}", f'- "registry.invalid/native-probe@{referrers[name]}"']:
+            assert argument in fetch, (path, name, argument)
+        assert f"- --{name}-bundle={bundle}" in gate, (path, name)
+        for argument in ["- verify-blob-attestation", "- --insecure-ignore-tlog", f"- --key=/verify/{name}.pub",
+                         f"- --type={predicate_type}", f"- --bundle={bundle}", "- /package/oci-manifest.json"]:
+            assert argument in cosign, (path, name, argument)
+        assert re.search(r"- name: attestations\n\s+mountPath: /attestations\n\s+readOnly: true", cosign), (path, name)
+    assert re.search(r"- name: attestations\n\s+mountPath: /attestations\n\s+readOnly: true", gate)
     assert "- --trust-state=verified-local-key" in init_blocks["validate-package"]
     assert "--installed-digest" not in pod, "no installation recorded in this render"
     # Trust material and registry access stay in their init containers.
+    fetchers = {"fetch-package-envelope", "fetch-package-sbom", "fetch-package-provenance", "pull-package"}
+    cosigns = {"verify-package-signature", "verify-package-sbom", "verify-package-provenance"}
     owners = {"mountPath: /trust": {"verify-package-publisher"},
               "name: signature-bundle": {"verify-package-publisher", "verify-package-signature"},
-              "name: verify\n": {"verify-package-publisher", "verify-package-signature"},
-              "name: registry-config": {"fetch-package-envelope", "pull-package"},
-              "registry.invalid/oras": {"fetch-package-envelope", "pull-package"},
-              "registry.invalid/cosign": {"verify-package-signature"}}
+              "name: attestations\n": {"fetch-package-sbom", "fetch-package-provenance", "verify-package-publisher",
+                                       "verify-package-sbom", "verify-package-provenance"},
+              "name: verify\n": {"verify-package-publisher"} | cosigns,
+              "name: registry-config": fetchers,
+              "registry.invalid/oras": fetchers,
+              "registry.invalid/cosign": cosigns}
     for marker, allowed in owners.items():
         holders = {name for name, body in {**init_blocks, **main_blocks}.items() if marker in body}
         # registry-config exists only with a registry Secret; the rest always.
         assert holders <= allowed and (holders == allowed or marker == "name: registry-config"), (path, marker, holders)
-    assert re.search(r"- name: verify\n\s+mountPath: /verify\n\s+readOnly: true", init_blocks["verify-package-signature"])
-    verify_volume = re.search(r"^        - name: verify\n((?:          .*\n)+)", volumes, re.M)
-    assert verify_volume and "medium: Memory" in verify_volume.group(1)
+    for name in cosigns:
+        assert re.search(r"- name: verify\n\s+mountPath: /verify\n\s+readOnly: true", init_blocks[name]), (path, name)
+    for name, limit in {"verify": "1Mi", "attestations": "3Mi"}.items():
+        volume = re.search(rf"^        - name: {name}\n((?:          .*\n)+)", volumes, re.M)
+        assert volume and "medium: Memory" in volume.group(1) and f"sizeLimit: {limit}" in volume.group(1), (path, name)
     assert "secretName: fixture-trust" in volumes and "secretName: fixture-bundle" in volumes
     assert "--offline" not in rendered and "--development-untrusted" not in rendered
 PY
@@ -328,17 +353,29 @@ installed_args=("${migration_args[@]}" --set-string trust.mode=managed-key-no-tl
 helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" \
   --set-string package.installedDigest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$fixture/installed.yaml"
 test "$(grep -c -- '--installed-digest=' "$fixture/installed.yaml")" -eq 1
+# Without configured attestations nothing is fetched for them and the gate
+# gets no attestation bundle, so a publisher requiring one fails closed.
 python3 - "$fixture/installed.yaml" <<'PY'
+import re
 import sys
-gate = open(sys.argv[1], encoding="utf-8").read().split("        - name: verify-package-publisher\n", 1)[1].split("        - name:", 1)[0]
+rendered = open(sys.argv[1], encoding="utf-8").read()
+gate = rendered.split("        - name: verify-package-publisher\n", 1)[1].split("        - name:", 1)[0]
 assert "- --installed-digest=sha256:" + "a" * 64 in gate
+init = rendered.split("      initContainers:\n", 1)[1].split("      containers:\n", 1)[0]
+assert re.findall(r"^        - name: ([a-z-]+)$", init, re.M) == [
+    "fetch-package-envelope", "verify-package-envelope", "verify-package-publisher",
+    "verify-package-signature", "pull-package", "validate-package"], init
+for forbidden in ["-bundle=/attestations/", "verify-blob-attestation", "--output=/attestations"]:
+    assert forbidden not in rendered, forbidden
 PY
 for invalid in sha256:ABC "sha256:$(printf 'a%.0s' {1..63})" "md5:$(printf 'a%.0s' {1..32})"; do
-  if helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" \
-    --set-string "package.installedDigest=$invalid" >/dev/null 2>&1; then
-    echo "chart accepted the installed digest $invalid" >&2
-    exit 1
-  fi
+  for value in package.installedDigest package.attestations.sbom package.attestations.provenance; do
+    if helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" \
+      --set-string "$value=$invalid" >/dev/null 2>&1; then
+      echo "chart accepted $value=$invalid" >&2
+      exit 1
+    fi
+  done
 done
 
 # Without signature trust the package layout is still checked before the pull,
@@ -354,7 +391,8 @@ for path in sys.argv[1:]:
     assert re.findall(r"^        - name: ([a-z-]+)$", init, re.M) == [
         "fetch-package-envelope", "verify-package-envelope", "pull-package", "validate-package"], (path, init)
     assert "- verify-envelope" in init
-    for forbidden in ["- verify-blob", "- verify-publisher", "insecure-ignore-tlog", "- name: trust\n", "- name: verify\n"]:
+    for forbidden in ["- verify-blob", "- verify-publisher", "insecure-ignore-tlog", "- name: trust\n", "- name: verify\n",
+                      "- name: attestations\n"]:
         assert forbidden not in rendered, (path, forbidden)
 PY
 
@@ -399,6 +437,10 @@ PY
 package_output="$fixture/package-output"
 release="$("$root/scripts/build-package.sh" 1.0.0 "$package_output")"
 jq -e '.trustState == "untrusted-development" and (.packageDigest | test("^sha256:[0-9a-f]{64}$"))' "$release" >/dev/null
+# The build records its exact source commit for the provenance attestation.
+jq -e --arg commit "$(git -C "$root" rev-parse --verify HEAD)" '.schemaVersion == 1 and (.sources | length == 1) and
+  .sources[0].commit == $commit and .sources[0].path == "." and (.sources[0].dirty | type == "boolean")' \
+  "$package_output/source-provenance.json" >/dev/null
 oras manifest fetch --oci-layout "$package_output/oci-layout:1.0.0" | jq -e '
   .artifactType == "application/vnd.stellwerk.plugin.package.v1" and
   ([.layers[].mediaType] | sort) == ([

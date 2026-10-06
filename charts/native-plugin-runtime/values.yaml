@@ -63,6 +63,13 @@ package:
   # after the signing key's validity window ended; revocation still blocks it.
   # Any other digest is a new installation and needs a currently valid key.
   installedDigest: ""
+  # managed-key-no-tlog: digests of the signed SBOM and source provenance
+  # referrers attest-layout-manifest.sh attached to the package (release.json
+  # .attestations.<name>.digest), pulled from the package repository. A
+  # publisher that requires an attestation fails closed without it.
+  attestations:
+    sbom: ""
+    provenance: ""
   # Optional dockerconfigjson Secret for the registry (usually the customer's
   # mirror). Mounted only into the ORAS fetch init containers.
   registryConfigSecret:

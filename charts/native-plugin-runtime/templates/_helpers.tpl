@@ -57,11 +57,19 @@ app.kubernetes.io/component: migration
 {{- end }}
 {{- end -}}
 
+{{/* The package repository without tag or digest. Attestation referrers are
+pulled from it by their own digests. */}}
+{{- define "native-plugin-runtime.packageRepository" -}}
+{{- regexReplaceAll "(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?@sha256:[0-9a-f]{64}$" .Values.package.reference "" -}}
+{{- end -}}
+
 {{/* Every replica fetches and verifies its own package copy into an emptyDir.
 Registry credentials, ORAS and trust material reach only these init
 containers, never the plugin, UI or token containers. */}}
 {{- define "native-plugin-runtime.fetchInitContainers" -}}
 {{- $managedKey := eq .Values.trust.mode "managed-key-no-tlog" }}
+{{- $attestations := .Values.package.attestations }}
+{{- $predicateTypes := dict "sbom" "https://spdx.dev/Document" "provenance" "https://stellwerk.dev/attestation/source-provenance/v1" }}
 - name: fetch-package-envelope
   image: {{ required "images.oras is required" .Values.images.oras | quote }}
   imagePullPolicy: {{ .Values.images.pullPolicy }}
@@ -113,8 +121,47 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /package
       readOnly: true
 {{- if $managedKey }}
+{{- range $name := list "sbom" "provenance" }}
+{{- with index $attestations $name }}
+# Signed attestation referrer of the package, pulled by its own digest.
+# Untrusted until the gate and Cosign verified it.
+- name: fetch-package-{{ $name }}
+  image: {{ $.Values.images.oras | quote }}
+  imagePullPolicy: {{ $.Values.images.pullPolicy }}
+  args:
+    - pull
+    - --no-tty
+    - --output=/attestations/{{ $name }}
+    {{- if $.Values.package.plainHTTP }}
+    - --plain-http
+    {{- end }}
+    {{- if $.Values.package.registryConfigSecret.name }}
+    - --registry-config=/registry/config.json
+    {{- end }}
+    - {{ printf "%s@%s" (include "native-plugin-runtime.packageRepository" $) . | quote }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml $.Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: attestations
+      mountPath: /attestations
+    {{- if $.Values.package.registryConfigSecret.name }}
+    - name: registry-config
+      mountPath: /registry
+      readOnly: true
+    {{- end }}
+    - name: temporary
+      mountPath: /tmp
+{{- end }}
+{{- end }}
 # Policy gate: the operator's trust bootstrap must pin this plugin's
-# publisher with managed-key-no-tlog; selects and checks the pinned key.
+# publisher with managed-key-no-tlog. Verifies the signature and the SBOM
+# and provenance attestations as one release set; a required attestation
+# that is not configured fails closed. Writes the pinned key of each part.
 - name: verify-package-publisher
   image: {{ .Values.images.runtime | quote }}
   imagePullPolicy: {{ .Values.images.pullPolicy }}
@@ -122,9 +169,14 @@ containers, never the plugin, UI or token containers. */}}
     - verify-publisher
     - --trust-bootstrap=/trust/publishers.json
     - --bundle=/signature/oci-manifest.sigstore.json
+    {{- range $name := list "sbom" "provenance" }}
+    {{- if index $attestations $name }}
+    - --{{ $name }}-bundle=/attestations/{{ $name }}/{{ $name }}.sigstore.json
+    {{- end }}
+    {{- end }}
     - --oci-manifest=/package/oci-manifest.json
     - --plugin-id={{ .Values.plugin.id }}
-    - --key-out=/verify/publisher.pub
+    - --key-dir=/verify
     {{- with .Values.package.installedDigest }}
     - --installed-digest={{ . }}
     {{- end }}
@@ -145,17 +197,20 @@ containers, never the plugin, UI or token containers. */}}
     - name: signature-bundle
       mountPath: /signature
       readOnly: true
+    - name: attestations
+      mountPath: /attestations
+      readOnly: true
     - name: verify
       mountPath: /verify
-# Independent Cosign verification with the key the gate selected.
-# Skipping the transparency log is valid only after that gate.
+# Independent Cosign verification of each part with the key the gate
+# selected. Skipping the transparency log is valid only after that gate.
 - name: verify-package-signature
   image: {{ required "images.cosign is required for managed-key-no-tlog trust" .Values.images.cosign | quote }}
   imagePullPolicy: {{ .Values.images.pullPolicy }}
   args:
     - verify-blob
     - --insecure-ignore-tlog
-    - --key=/verify/publisher.pub
+    - --key=/verify/package.pub
     - --bundle=/signature/oci-manifest.sigstore.json
     - /package/oci-manifest.json
   securityContext:
@@ -177,6 +232,39 @@ containers, never the plugin, UI or token containers. */}}
       readOnly: true
     - name: temporary
       mountPath: /tmp
+{{- range $name := list "sbom" "provenance" }}
+{{- if index $attestations $name }}
+- name: verify-package-{{ $name }}
+  image: {{ $.Values.images.cosign | quote }}
+  imagePullPolicy: {{ $.Values.images.pullPolicy }}
+  args:
+    - verify-blob-attestation
+    - --insecure-ignore-tlog
+    - --key=/verify/{{ $name }}.pub
+    - --type={{ index $predicateTypes $name }}
+    - --bundle=/attestations/{{ $name }}/{{ $name }}.sigstore.json
+    - /package/oci-manifest.json
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml $.Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+      readOnly: true
+    - name: verify
+      mountPath: /verify
+      readOnly: true
+    - name: attestations
+      mountPath: /attestations
+      readOnly: true
+    - name: temporary
+      mountPath: /tmp
+{{- end }}
+{{- end }}
 {{- end }}
 - name: pull-package
   image: {{ .Values.images.oras | quote }}
@@ -235,6 +323,10 @@ containers, never the plugin, UI or token containers. */}}
   emptyDir:
     medium: Memory
     sizeLimit: 1Mi
+- name: attestations
+  emptyDir:
+    medium: Memory
+    sizeLimit: 3Mi
 - name: trust
   secret:
     secretName: {{ required "trust.bootstrapSecret.name is required" .Values.trust.bootstrapSecret.name }}

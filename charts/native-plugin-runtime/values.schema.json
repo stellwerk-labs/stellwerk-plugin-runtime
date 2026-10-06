@@ -65,10 +65,19 @@
     "package": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reference", "manifestSHA256", "installedDigest", "plainHTTP", "registryConfigSecret"],
+      "required": ["reference", "manifestSHA256", "installedDigest", "attestations", "plainHTTP", "registryConfigSecret"],
       "properties": {
         "reference": {"type": "string"},
         "installedDigest": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"},
+        "attestations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sbom", "provenance"],
+          "properties": {
+            "sbom": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"},
+            "provenance": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"}
+          }
+        },
         "manifestSHA256": {"type": "string"},
         "plainHTTP": {"type": "boolean"},
         "registryConfigSecret": {

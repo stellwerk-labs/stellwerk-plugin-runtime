@@ -49,11 +49,16 @@ output="$(mktemp -d)"
 jq . "$output/release.json"
 ```
 
+The build also writes `source-provenance.json` (predicate
+`https://stellwerk.dev/attestation/source-provenance/v1`): schema version 1,
+the git commit the package was built from, whether the worktree had
+uncommitted changes, and the Go version.
+
 ## Launcher commands
 
 | Command | Purpose |
 |---|---|
-| `verify-publisher` | Apply the operator's trust bootstrap: accept a bundle without transparency-log inclusion only for a publisher pinned with `managed-key-no-tlog`, verify it offline and write the pinned key for Cosign. |
+| `verify-publisher` | Apply the operator's trust bootstrap: accept bundles without transparency-log inclusion only for a publisher pinned with `managed-key-no-tlog`, verify the package signature and the SBOM and provenance attestations offline as one release set and write each part's pinned key for Cosign (`--key-dir`). |
 | `verify-envelope` | Before any content is pulled, bind the fetched OCI manifest to the pinned package digest and the operator-approved plugin manifest hash, and admit only the layers of the package format. |
 | `validate` | Verify the plugin manifest, selected executable and UI assets against their digests and write a read-only validation receipt. |
 | `run` | Re-verify package and receipt, then execute the verified bytes from a sealed in-memory copy. |
@@ -105,9 +110,9 @@ only afterwards.
   which are signed with a managed key and never uploaded to a public
   transparency log, so private digests, identities and release cadence stay
   unpublished. Before the pull, `verify-publisher` evaluates the operator's
-  trust bootstrap and the detached bundle, and Cosign then verifies the same
-  manifest bytes again with the key the gate selected. The receipt records
-  `verified-local-key`.
+  trust bootstrap, the detached signature bundle and the SBOM and provenance
+  attestations as one release set, and Cosign then verifies each part again
+  with the key the gate selected. The receipt records `verified-local-key`.
 - `development-untrusted`: skips signature verification and is visible to the
   plugin as `untrusted-development`. It exists for local development only.
 
@@ -143,6 +148,14 @@ package:
   overlapping windows allow rotation.
 - `revokedKeyIds` (top level, key hints) is the compromise list: a revoked
   key blocks new installations and re-fetches of installed digests alike.
+- A release set is the package signature plus signed in-toto attestations
+  about the package digest: an SPDX 2 JSON SBOM (`https://spdx.dev/Document`)
+  and the source provenance. Each is a Sigstore v0.3 DSSE bundle signed with
+  a pinned key of the same publisher under the same validity and revocation
+  rules, and names exactly the package digest as its only subject.
+  `requireSBOM` and `requireProvenance` on a publisher default to `true` for
+  `managed-key-no-tlog`; a required attestation that is missing fails
+  closed, and a supplied one is always verified.
 - Publisher signing keys and entitlement issuer keys are separate keys.
 
 Signatures authenticate code; they do not sandbox it. Native plugins share the
@@ -155,9 +168,26 @@ with networking disabled:
 
 ```sh
 ./scripts/sign-layout-manifest.sh "$output" /path/to/cosign.key
+./scripts/attest-layout-manifest.sh "$output" /path/to/cosign.key sbom.spdx.json
 ./scripts/verify-layout-manifest.sh "$output" /path/to/cosign.pub
 ./scripts/offline-bundle.sh "$output" package.tar   # air-gapped transfer
+oras cp -r --from-oci-layout "$output/oci-layout:1.0.0" registry.example/native-probe:1.0.0
 ```
+
+`attest-layout-manifest.sh` signs the SBOM and the build's
+`source-provenance.json` with the same managed key and no transparency log
+(`cosign attest-blob`, subject: the exact OCI manifest) and attaches each
+bundle as an OCI referrer of the package manifest (Cosign's bundle referrer
+convention: artifact type `application/vnd.dev.sigstore.bundle.v0.3+json`,
+annotation `dev.sigstore.bundle.predicateType`). `release.json` records the
+referrer digests under `attestations`; they go into
+`package.attestations.sbom` and `package.attestations.provenance`.
+`verify-layout-manifest.sh` verifies the recorded attestations too, and
+`oras cp -r` and the offline bundle carry them with the package.
+
+The SBOM is an input: none of the pinned tools (Cosign, ORAS, the Go
+toolchain) generates SPDX, so the publisher's SBOM generator produces an
+SPDX 2 JSON document of the package contents.
 
 Signing uses Cosign's signing-config mechanism with a configuration that
 lists no transparency log, timestamp authority or certificate authority
@@ -185,14 +215,17 @@ plugin container only, never into the fetch init containers.
 
 Every replica fetches and verifies its own copy of the package in init
 containers (`fetch-package-envelope`, `verify-package-envelope`, for
-`managed-key-no-tlog` `verify-package-publisher` and
-`verify-package-signature`, then `pull-package` and `validate-package`) into
+`managed-key-no-tlog` `fetch-package-sbom` and `fetch-package-provenance`
+for each configured attestation, `verify-package-publisher`,
+`verify-package-signature`, `verify-package-sbom` and
+`verify-package-provenance`, then `pull-package` and `validate-package`) into
 an `emptyDir` (`packageVolume.sizeLimit`). Replicas therefore need no shared
-storage and can run on any node. Registry credentials and the ORAS image
-reach only the two ORAS init containers, the trust bootstrap only the
-publisher gate, and the signature bundle only the gate and Cosign; the
-plugin, UI and token containers mount none of them and see the package
-read-only.
+storage and can run on any node. Attestation referrers are pulled by digest
+from the package repository into a small in-memory volume. Registry
+credentials and the ORAS image reach only the ORAS init containers, the trust
+bootstrap only the publisher gate, and the signature bundle and attestations
+only the gate and Cosign; the plugin, UI and token containers mount none of
+them and see the package read-only.
 
 Registry egress is limited to the customer's mirror endpoints listed in
 `networkPolicy.registryMirrors`: single addresses (`/32` or `/128`) or exact
@@ -303,7 +336,7 @@ Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
 ```sh
 ./scripts/check.sh                  # gofmt, go test -race, go vet, Linux execution tests, chart contract, package build
 ./scripts/compose-test.sh           # run and serve-ui as non-root PID 1, filtered environment, state, CSP, exit 0 on SIGTERM
-./scripts/package-init-chain-test.sh  # sign, bundle, publish locally, run the chart init chain, negatives
+./scripts/package-init-chain-test.sh  # sign, attest, bundle, publish locally, run the chart init chain, negatives
 ./scripts/kind-test.sh              # install, package upgrade, restart, rollback on a throwaway kind cluster
 ```
 

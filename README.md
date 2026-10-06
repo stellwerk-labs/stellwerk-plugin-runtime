@@ -1,0 +1,231 @@
+# Stellwerk plugin runtime
+
+Generic runtime for native Stellwerk plugins. One unchanged runtime image runs
+any plugin that is delivered as a signed OCI package; a plugin release never
+requires a new runtime, control plane or console image.
+
+The repository contains:
+
+- `runtime/`: the launcher. It verifies a package, writes a validation
+  receipt, starts the plugin executable and serves the plugin's static UI.
+- `charts/native-plugin-runtime/`: the Helm chart that pulls, verifies and runs
+  one plugin package as its own Kubernetes workload.
+- `scripts/`: package build, offline signing, verification and test tooling.
+- `probe/`: a minimal smoke-test plugin. It has no Stellwerk API, IAM, event,
+  UI or database integration and proves only that the runtime works.
+
+The plugin contract is `v1alpha` and covers first-party Stellwerk plugins only.
+It is not yet a stable partner contract.
+
+## Package format
+
+A package is an OCI Image Specification 1.1 artifact with artifact type
+`application/vnd.stellwerk.plugin.package.v1`. Its layers are:
+
+| Media type | Title | Content |
+|---|---|---|
+| `application/vnd.stellwerk.plugin.manifest.v1+json` | `plugin-manifest.json` | strict plugin manifest |
+| `application/vnd.stellwerk.plugin.executable.v1` | `bin/linux/<arch>/plugin` | static Linux executable per platform |
+| `application/vnd.stellwerk.plugin.ui.asset.v1` | `ui/...` | optional UI manifest and assets |
+
+The plugin manifest (`schemaVersion` 1, `runtimeProfile` `native-static-v1`,
+`protocolVersion` 1) names the plugin ID, canonical SemVer version, one
+executable per platform (`linux/amd64`, `linux/arm64`) with its SHA-256, an
+optional UI manifest digest and an optional entitlement declaration. Unknown
+fields, trailing JSON, non-canonical versions and unexpected paths are
+rejected. Tags are an authoring convenience; installations pin the package by
+digest.
+
+Every layer must carry its title, a unique clean path from the table above,
+within fixed size limits (plugin manifest 256 KiB, executables 256 MiB, UI
+files 64 MiB, at most 2001 UI layers and about 577 MiB in total).
+Archive layers, such as an ORAS directory push, are refused: a package
+contains plain files only. ORAS checks each pulled blob against its
+descriptor, so these declared limits bound what a pull can write.
+
+```sh
+output="$(mktemp -d)"
+./scripts/build-package.sh 1.0.0 "$output"   # probe package as an OCI layout
+jq . "$output/release.json"
+```
+
+## Launcher commands
+
+| Command | Purpose |
+|---|---|
+| `verify-envelope` | Before any content is pulled, bind the fetched OCI manifest to the pinned package digest and the operator-approved plugin manifest hash, and admit only the layers of the package format. |
+| `validate` | Verify the plugin manifest, selected executable and UI assets against their digests and write a read-only validation receipt. |
+| `run` | Re-verify package and receipt, then execute the verified bytes from a sealed in-memory copy. |
+| `serve-ui` | Serve only manifest-declared, digest-verified UI assets. |
+
+Every command requires the plugin ID, version and manifest SHA-256 chosen by
+the operator. Package files are read only as bounded regular files; symlinks,
+path traversal, oversized files, a missing platform and digest mismatches fail
+closed.
+
+### Execution
+
+`run` never executes a package path. It reads the selected executable once
+into private memory, checks its SHA-256, copies those bytes into an anonymous
+`memfd`, seals it against writes, truncation and growth, and `exec`s the
+sealed file through `/proc/self/fd`. Whatever happens to the package
+directory after verification, by rename or in-place rewrite, cannot change
+what runs. Package files need no execute permission and the package volume may
+be mounted `noexec`.
+
+Requirements and consequences:
+
+- Linux with `memfd_create` (3.17+) and a mounted `/proc`. The
+  `vm.memfd_noexec` sysctl must not be `2`; the container runtime's default
+  seccomp profile allows the calls.
+- The sealed copy lives in memory and counts toward the container memory
+  limit, so size `resources.limits.memory` for executable size plus working
+  set.
+- Executables must be static binaries. Interpreter scripts cannot be started
+  from a close-on-exec memfd and are not part of `native-static-v1`.
+
+`run` hands the plugin a filtered environment: only `STELLWERK_PLUGIN_*`,
+`OTEL_*` and `SSL_CERT_FILE` pass through, plus `PLUGIN_ID`,
+`PLUGIN_VERSION`, `PLUGIN_LISTEN`, `PLUGIN_STATE` and `PLUGIN_TRUST_STATE`.
+The plugin becomes the container's PID 1, so it receives `SIGTERM` directly
+and must handle it to shut down cleanly.
+
+## Trust
+
+Package trust and entitlement trust are separate decisions.
+
+In both modes the chart first fetches the OCI manifest by digest and checks
+it with `verify-envelope`; package content is pulled only afterwards.
+
+- `cosign-key`: additionally verifies the detached Cosign bundle over those
+  exact manifest bytes with the operator's pinned public key before the pull.
+  The receipt records `verified-local-key`.
+- `development-untrusted`: skips signature verification and is visible to the
+  plugin as `untrusted-development`. It exists for local development only.
+
+Signatures authenticate code; they do not sandbox it. Native plugins share the
+node kernel with other workloads. A valid key signature proves package
+integrity for the key holder, not a production publisher identity, key custody
+or transparency policy. An entitlement declaration in the manifest states a
+requirement; the control plane verifies licences against its own issuer
+trust, the launcher never sees licence keys.
+
+Offline signing and verification use the digest-pinned official Cosign image
+with networking disabled:
+
+```sh
+./scripts/sign-layout-manifest.sh "$output" /path/to/cosign.key
+./scripts/verify-layout-manifest.sh "$output" /path/to/cosign.pub
+./scripts/offline-bundle.sh "$output" package.tar   # air-gapped transfer
+```
+
+The signature covers the exact OCI manifest bytes, so publishing must
+preserve the manifest digest. Pinned-key bundles deliberately carry no public
+transparency log entry, hence `--insecure-ignore-tlog`; the public key check
+itself remains mandatory.
+
+## Helm chart
+
+The chart is disabled by default and creates nothing until `enabled=true`. An
+enabled installation requires a digest-pinned package reference, runtime image
+and ORAS image (plus a Cosign image for `cosign-key`), the exact plugin
+manifest hash and an explicit `trust.mode`; there is no default trust mode. No
+image, digest, trust root or key is shipped as a default.
+
+It deploys one `Recreate` workload with a dedicated ServiceAccount (token
+automount disabled), non-root security contexts, read-only root and package mounts, bounded
+resources and a default NetworkPolicy. Secret volumes are mounted `0440`,
+the state `emptyDir` is bounded by `stateVolume.sizeLimit` and service links
+are disabled. Only the ORAS init containers receive registry credentials. `pluginSecretFiles` mounts operator-owned Secrets into
+the plugin container only, never into fetch or verification containers.
+
+The NetworkPolicy admits only the configured control plane caller and permits
+egress only to the backend Gateway proxy, the plugin database and DNS. The
+default selectors match the `platform-orchestrator` release of the Stellwerk
+Helm chart (Envoy Gateway proxy target port 10443, CloudNativePG cluster);
+override them for other installations. The configured control plane URL must
+resolve to that same Gateway. Package pulls fail closed until the operator adds
+an exact registry rule under `networkPolicy.additionalEgress`; no public
+registry CIDR is a safe default.
+
+### Migration phase
+
+Database migration is an explicit installer phase, not a startup side effect.
+Install with `runtime.enabled=false,migration.enabled=true`, wait for the Job
+to succeed and record that result, then upgrade to
+`migration.enabled=false,runtime.enabled=true`. The chart rejects both phases
+at once. The migration profile (`mode: native-migrate`) comes from
+`migration.profileSecret`, the migration principal's database URL from a
+separate `migration.databaseSecret` mounted at
+`/run/secrets/stellwerk-plugin-migration/database-url`. Neither Secret reaches
+ORAS, Cosign, validation or the runtime Deployment, and the chart refuses to
+mount them into the runtime.
+
+The optional `migration.databaseCASecret` mounts one public CA key read-only at
+`/run/config/database-ca/ca.crt` in the migration container only, so the
+profile can use `sslmode=verify-full&sslrootcert=/run/config/database-ca/ca.crt`.
+It must be a Secret separate from the profile and credential Secrets. Mount a
+CA into the runtime through `pluginSecretFiles` if the runtime needs one.
+
+### UI
+
+With `ui.enabled=true` a second container runs `serve-ui` from the same runtime
+image and mounts only the read-only package. It serves declared assets under
+`/embed/` with a restrictive CSP, allows only `GET` and `HEAD`, issues no
+cookies, proxies no API and generates `/embed/config.js` from
+`ui.consoleOrigin`. On `SIGTERM` it stops accepting connections, drains
+in-flight requests for up to five seconds and exits 0. Route the `ui` port through a TLS Gateway on a hostname
+different from the console, and add the exact Gateway peer for that port to
+`networkPolicy.additionalIngress`. `ui.gateway.enabled` creates a plugin-owned
+Gateway and, with `ui.gateway.issuerName`, a cert-manager Certificate.
+
+## Building the runtime image
+
+The image is `FROM scratch` with one static binary and runs as UID 65532.
+
+```sh
+for arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "dist/runtime-linux-$arch" ./runtime
+done
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.runtime dist
+```
+
+## Checks
+
+Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
+`kubectl` for the cluster test.
+
+```sh
+./scripts/check.sh                  # gofmt, go test -race, go vet, Linux execution tests, chart contract, package build
+./scripts/compose-test.sh           # run and serve-ui as non-root PID 1, filtered environment, state, CSP, exit 0 on SIGTERM
+./scripts/package-init-chain-test.sh  # sign, bundle, publish locally, run the chart init chain, negatives
+./scripts/kind-test.sh              # install, package upgrade, restart, rollback on a throwaway kind cluster
+```
+
+`LINUX_TEST_PLATFORM=linux/amd64 ./scripts/linux-test.sh` and
+`NATIVE_INIT_PLATFORM=linux/amd64 ./scripts/package-init-chain-test.sh` run the
+other architecture where Docker can emulate it; emulation is no substitute for
+a native runner of that architecture.
+
+All Docker based tests use uniquely named containers, loopback-only random
+ports and temporary directories, and remove what they create.
+
+## Limits
+
+- The chart does not register the installation with the control plane.
+  Package, service identity and declared operations are registered there
+  separately.
+- NetworkPolicy selects workloads, not database roles or control plane
+  identities. Operators provision separate plugin database runtime and
+  migration principals and a scoped control plane identity.
+- NetworkPolicy cannot prove that a public hostname maps to the selected
+  Gateway Pods. Bind control plane URL, DNS, certificate SAN and the
+  `networkPolicy.coreGateway` peer as one verified configuration.
+- `Recreate` prevents overlap within one Deployment; it is not a fenced
+  single-writer protocol.
+- `trustState` in the receipt is consistency metadata, not cryptographic
+  evidence on its own.
+
+## License
+
+Licensed under the [European Union Public Licence 1.2](./LICENSE).

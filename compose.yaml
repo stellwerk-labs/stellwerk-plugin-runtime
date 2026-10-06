@@ -1,0 +1,89 @@
+services:
+  validate:
+    image: ${NATIVE_PLUGIN_RUNTIME_IMAGE:?set NATIVE_PLUGIN_RUNTIME_IMAGE}
+    user: "65532:65532"
+    read_only: true
+    command:
+      - validate
+      - --development-untrusted
+      - --package-dir=/package
+      - --manifest=/package/plugin-manifest.json
+      - --state-file=/package/runtime-state.json
+      - --plugin-id=dev.stellwerk.native-probe
+      - --plugin-version=${NATIVE_PLUGIN_VERSION:?set NATIVE_PLUGIN_VERSION}
+      - --manifest-sha256=${NATIVE_PLUGIN_MANIFEST_SHA256:?set NATIVE_PLUGIN_MANIFEST_SHA256}
+      - --trust-state=untrusted-development
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 32
+    volumes:
+      - ${NATIVE_PLUGIN_PACKAGE_DIR:?set NATIVE_PLUGIN_PACKAGE_DIR}:/package
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+
+  plugin:
+    image: ${NATIVE_PLUGIN_RUNTIME_IMAGE:?set NATIVE_PLUGIN_RUNTIME_IMAGE}
+    user: "65532:65532"
+    read_only: true
+    depends_on:
+      validate:
+        condition: service_completed_successfully
+    command:
+      - run
+      - --development-untrusted
+      - --package-dir=/package
+      - --manifest=/package/plugin-manifest.json
+      - --state-file=/package/runtime-state.json
+      - --plugin-id=dev.stellwerk.native-probe
+      - --plugin-version=${NATIVE_PLUGIN_VERSION:?set NATIVE_PLUGIN_VERSION}
+      - --manifest-sha256=${NATIVE_PLUGIN_MANIFEST_SHA256:?set NATIVE_PLUGIN_MANIFEST_SHA256}
+      - --listen=0.0.0.0:8080
+      - --plugin-state=/state
+    environment:
+      AMBIENT_CANARY: must-not-reach-plugin
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 32
+    ports:
+      - 127.0.0.1::8080
+    volumes:
+      - ${NATIVE_PLUGIN_PACKAGE_DIR:?set NATIVE_PLUGIN_PACKAGE_DIR}:/package:ro
+      - ${NATIVE_PLUGIN_STATE_DIR:?set NATIVE_PLUGIN_STATE_DIR}:/state
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+
+  ui:
+    image: ${NATIVE_PLUGIN_RUNTIME_IMAGE:?set NATIVE_PLUGIN_RUNTIME_IMAGE}
+    user: "65532:65532"
+    read_only: true
+    depends_on:
+      validate:
+        condition: service_completed_successfully
+    command:
+      - serve-ui
+      - --development-untrusted
+      - --package-dir=/package
+      - --manifest=/package/plugin-manifest.json
+      - --state-file=/package/runtime-state.json
+      - --plugin-id=dev.stellwerk.native-probe
+      - --plugin-version=${NATIVE_PLUGIN_VERSION:?set NATIVE_PLUGIN_VERSION}
+      - --manifest-sha256=${NATIVE_PLUGIN_MANIFEST_SHA256:?set NATIVE_PLUGIN_MANIFEST_SHA256}
+      - --listen=0.0.0.0:8081
+      - --console-origin=https://console.example.test
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 32
+    ports:
+      - 127.0.0.1::8081
+    volumes:
+      - ${NATIVE_PLUGIN_PACKAGE_DIR:?set NATIVE_PLUGIN_PACKAGE_DIR}:/package:ro

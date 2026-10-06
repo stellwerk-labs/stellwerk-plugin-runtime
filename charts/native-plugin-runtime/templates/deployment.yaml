@@ -1,0 +1,347 @@
+{{- if and .Values.enabled .Values.runtime.enabled }}
+{{- if and .Values.ui.enabled (eq (int .Values.ui.port) (int .Values.plugin.port)) }}
+{{- fail "UI and plugin ports must be different" }}
+{{- end }}
+{{- if and .Values.ui.enabled .Values.networkPolicy.enabled (eq (len .Values.networkPolicy.additionalIngress) 0) }}
+{{- fail "ui.enabled with networkPolicy.enabled requires an exact UI Gateway peer and ui.port rule in networkPolicy.additionalIngress" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "native-plugin-runtime.fullname" . }}
+  labels:
+    {{- include "native-plugin-runtime.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "native-plugin-runtime.runtimeSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "native-plugin-runtime.runtimeSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        stellwerk.dev/plugin-package: {{ .Values.package.reference | quote }}
+        stellwerk.dev/plugin-trust-mode: {{ .Values.trust.mode | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "native-plugin-runtime.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: fetch-package-envelope
+          image: {{ required "images.oras is required" .Values.images.oras | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - manifest
+            - fetch
+            - --output=/package/oci-manifest.json
+            {{- if .Values.package.plainHTTP }}
+            - --plain-http
+            {{- end }}
+            {{- if .Values.package.registryConfigSecret.name }}
+            - --registry-config=/registry/config.json
+            {{- end }}
+            - {{ .Values.package.reference | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.initResources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+            {{- if .Values.package.registryConfigSecret.name }}
+            - name: registry-config
+              mountPath: /registry
+              readOnly: true
+            {{- end }}
+            - name: temporary
+              mountPath: /tmp
+        - name: verify-package-envelope
+          image: {{ required "images.runtime is required" .Values.images.runtime | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - verify-envelope
+            - --oci-manifest=/package/oci-manifest.json
+            - --package-digest={{ regexFind "sha256:[0-9a-f]{64}$" .Values.package.reference }}
+            - --manifest-sha256={{ .Values.package.manifestSHA256 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.initResources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+              readOnly: true
+            - name: temporary
+              mountPath: /tmp
+        {{- if eq .Values.trust.mode "cosign-key" }}
+        - name: verify-package-signature
+          image: {{ required "images.cosign is required for cosign-key trust" .Values.images.cosign | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - verify-blob
+            - --insecure-ignore-tlog
+            - --key=/trust/{{ .Values.trust.cosign.publicKeySecret.key }}
+            - --bundle=/signature/{{ .Values.trust.cosign.signatureBundleSecret.key }}
+            - /package/oci-manifest.json
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.initResources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+              readOnly: true
+            - name: trust
+              mountPath: /trust
+              readOnly: true
+            - name: signature-bundle
+              mountPath: /signature
+              readOnly: true
+            - name: temporary
+              mountPath: /tmp
+        {{- end }}
+        - name: pull-package
+          image: {{ required "images.oras is required" .Values.images.oras | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - pull
+            - --no-tty
+            - --output=/package
+            {{- if .Values.package.plainHTTP }}
+            - --plain-http
+            {{- end }}
+            {{- if .Values.package.registryConfigSecret.name }}
+            - --registry-config=/registry/config.json
+            {{- end }}
+            - {{ .Values.package.reference | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.initResources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+            {{- if .Values.package.registryConfigSecret.name }}
+            - name: registry-config
+              mountPath: /registry
+              readOnly: true
+            {{- end }}
+            - name: temporary
+              mountPath: /tmp
+        - name: validate-package
+          image: {{ required "images.runtime is required" .Values.images.runtime | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - validate
+            {{- include "native-plugin-runtime.commonArgs" . | nindent 12 }}
+            - --trust-state={{ if eq .Values.trust.mode "cosign-key" }}verified-local-key{{ else }}untrusted-development{{ end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.initResources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+            - name: temporary
+              mountPath: /tmp
+      containers:
+        - name: plugin
+          image: {{ required "images.runtime is required" .Values.images.runtime | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - run
+            {{- include "native-plugin-runtime.commonArgs" . | nindent 12 }}
+            - --listen=0.0.0.0:{{ .Values.plugin.port }}
+            - --plugin-state=/state
+          {{- with .Values.pluginEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.plugin.port }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.path | quote }}
+              scheme: {{ .Values.probes.scheme }}
+              port: http
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.path | quote }}
+              scheme: {{ .Values.probes.scheme }}
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.path | quote }}
+              scheme: {{ .Values.probes.scheme }}
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+              readOnly: true
+            - name: state
+              mountPath: /state
+            - name: temporary
+              mountPath: /tmp
+            {{- if .Values.serviceAccount.projectedIdentity.enabled }}
+            - name: workload-identity
+              mountPath: /var/run/secrets/stellwerk.dev
+              readOnly: true
+            {{- end }}
+            {{- range .Values.pluginSecretFiles }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath | quote }}
+              readOnly: true
+            {{- end }}
+        {{- if .Values.ui.enabled }}
+        - name: ui
+          image: {{ .Values.images.runtime | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - serve-ui
+            {{- include "native-plugin-runtime.commonArgs" . | nindent 12 }}
+            - --listen=0.0.0.0:{{ .Values.ui.port }}
+            - --console-origin={{ .Values.ui.consoleOrigin }}
+          ports:
+            - name: ui
+              containerPort: {{ .Values.ui.port }}
+          readinessProbe:
+            httpGet: {path: /health, port: ui}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: ui}
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          volumeMounts:
+            - name: package
+              mountPath: /package
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: package
+          emptyDir:
+            sizeLimit: {{ .Values.packageVolume.sizeLimit }}
+        - name: temporary
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "native-plugin-runtime.fullname" . }}-state
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.stateVolume.sizeLimit }}
+          {{- end }}
+        {{- if eq .Values.trust.mode "cosign-key" }}
+        - name: trust
+          secret:
+            secretName: {{ required "trust.cosign.publicKeySecret.name is required" .Values.trust.cosign.publicKeySecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.trust.cosign.publicKeySecret.key }}
+                path: {{ .Values.trust.cosign.publicKeySecret.key }}
+        - name: signature-bundle
+          secret:
+            secretName: {{ required "trust.cosign.signatureBundleSecret.name is required" .Values.trust.cosign.signatureBundleSecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.trust.cosign.signatureBundleSecret.key }}
+                path: {{ .Values.trust.cosign.signatureBundleSecret.key }}
+        {{- end }}
+        {{- if .Values.package.registryConfigSecret.name }}
+        - name: registry-config
+          secret:
+            secretName: {{ .Values.package.registryConfigSecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.package.registryConfigSecret.key }}
+                path: config.json
+        {{- end }}
+        {{- if .Values.serviceAccount.projectedIdentity.enabled }}
+        - name: workload-identity
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .Values.serviceAccount.projectedIdentity.audience | quote }}
+                  expirationSeconds: {{ .Values.serviceAccount.projectedIdentity.expirationSeconds }}
+                  path: token
+        {{- end }}
+        {{- range .Values.pluginSecretFiles }}
+        - name: {{ .name }}
+          secret:
+            secretName: {{ .secretName }}
+            defaultMode: 0440
+            items:
+              {{- range .items }}
+              - key: {{ .key }}
+                path: {{ .path }}
+              {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

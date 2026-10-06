@@ -1,0 +1,205 @@
+# The chart is inert unless an operator supplies all immutable package inputs.
+enabled: false
+
+plugin:
+  id: ""
+  version: ""
+  port: 8080
+
+# Generic static serving uses the same runtime image and signed package. TLS
+# terminates at the Console Gateway; no backend credentials enter this container.
+ui:
+  enabled: false
+  port: 8081
+  consoleOrigin: ""
+  resources:
+    requests: {cpu: 10m, memory: 96Mi}
+    limits: {cpu: 200m, memory: 192Mi}
+  gateway:
+    enabled: false
+    className: ""
+    hostname: ""
+    certificateSecretName: ""
+    # Leave empty to use an existing certificate Secret. Otherwise create a
+    # Certificate through the already-installed cert-manager issuer.
+    issuerName: ""
+    issuerKind: ClusterIssuer
+
+# Runtime serving is a separate installer phase from migration. The installer
+# must keep this false until the matching migration Job has succeeded.
+runtime:
+  enabled: true
+
+migration:
+  enabled: false
+  activeDeadlineSeconds: 300
+  backoffLimit: 2
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Operator-created mode:native-migrate profile. It must refer to the fixed
+  # migrationDatabaseUrlFile path below and contain no runtime credentials.
+  profileSecret:
+    name: ""
+    key: profile.json
+  # Dedicated migration principal, never the runtime database Secret.
+  databaseSecret:
+    name: ""
+    key: database-url
+  # Optional public CA for verify-full migration database transport. Mounted
+  # only in migrate, never package init containers, at the fixed path below.
+  databaseCASecret:
+    name: ""
+    key: ca.crt
+
+package:
+  # OCI registry reference. Enabled installations require an @sha256 digest.
+  reference: ""
+  manifestSHA256: ""
+  plainHTTP: false
+  # Optional dockerconfigjson Secret. It is mounted only into init containers.
+  registryConfigSecret:
+    name: ""
+    key: .dockerconfigjson
+
+trust:
+  # Required for an enabled installation, there is no default: cosign-key, or
+  # development-untrusted for local development. The development profile is
+  # visible to the plugin and must never be presented as production
+  # verification.
+  mode: ""
+  cosign:
+    publicKeySecret:
+      name: ""
+      key: cosign.pub
+    # Operator-provided bundle from sign-layout-manifest.sh. It signs the
+    # exact OCI manifest whose digest is pinned in package.reference.
+    signatureBundleSecret:
+      name: ""
+      key: oci-manifest.sigstore.json
+
+images:
+  # Enabled installations require immutable @sha256 references.
+  runtime: ""
+  oras: ""
+  cosign: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  projectedIdentity:
+    enabled: false
+    audience: platform-orchestrator
+    expirationSeconds: 600
+
+podAnnotations: {}
+podLabels: {}
+
+# The launcher executes a sealed in-memory copy of the plugin executable, so
+# the memory limit must cover executable size plus the plugin's working set.
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+initResources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+packageVolume:
+  sizeLimit: 512Mi
+
+# Bounds the plugin state emptyDir used when persistence is disabled, and the
+# migration Job's state directory.
+stateVolume:
+  sizeLimit: 128Mi
+
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClassName: ""
+
+service:
+  type: ClusterIP
+
+probes:
+  path: /health
+  scheme: HTTP
+  startup:
+    failureThreshold: 30
+    periodSeconds: 2
+  readiness:
+    periodSeconds: 5
+  liveness:
+    periodSeconds: 10
+
+terminationGracePeriodSeconds: 10
+
+# Only these explicitly supplied names reach the executable. The launcher also
+# filters its process environment to STELLWERK_PLUGIN_*, OTEL_* and SSL_CERT_FILE.
+pluginEnv: []
+
+# Operator-owned configuration mounted only into the plugin container. Use a
+# STELLWERK_PLUGIN_* environment variable to tell the executable where its
+# profile lives. Keep database URLs and verification keys in separate Secrets
+# so they can have independent ownership and rotation policies.
+pluginSecretFiles: []
+#  - name: plugin-profile
+#    secretName: plugin-profile
+#    mountPath: /var/run/secrets/stellwerk/plugin-profile
+#    items:
+#      - key: profile.json
+#        path: profile.json
+
+networkPolicy:
+  enabled: true
+  # Only the configured Core gateway may call the plugin.
+  ingressGateway:
+    namespaceSelector:
+      kubernetes.io/metadata.name: platform-orchestrator
+    podSelector:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: platform-orchestrator
+  # Plugin callbacks use the authenticated HTTPS backend Gateway. The service
+  # listens on 443; NetworkPolicy must name the selected proxy Pod's target
+  # port (10443 for the EnvoyProxy profile shipped with the Stellwerk chart).
+  # Override all three selectors/port when the Gateway implementation differs.
+  coreGateway:
+    namespaceSelector:
+      kubernetes.io/metadata.name: envoy-gateway-system
+    podSelector:
+      gateway.envoyproxy.io/owning-gateway-namespace: platform-orchestrator
+      gateway.envoyproxy.io/owning-gateway-name: platform-orchestrator-backend-gateway
+    port: 10443
+  # The plugin database must use its own database and runtime principal even
+  # when it shares a PostgreSQL cluster with Core services.
+  database:
+    namespaceSelector:
+      kubernetes.io/metadata.name: platform-orchestrator
+    podSelector:
+      cnpg.io/cluster: platform-orchestrator-cnpg-databases
+    port: 5432
+  dns:
+    namespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+    podSelector:
+      k8s-app: kube-dns
+  # ORAS package pulls require an operator-specific registry rule here. No
+  # public-registry CIDR is broad enough to be a safe chart default.
+  additionalIngress: []
+  additionalEgress: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

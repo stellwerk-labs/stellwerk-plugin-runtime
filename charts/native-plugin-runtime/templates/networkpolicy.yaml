@@ -1,0 +1,63 @@
+{{- if and .Values.enabled .Values.runtime.enabled .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "native-plugin-runtime.fullname" . }}
+  labels:
+    {{- include "native-plugin-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "native-plugin-runtime.runtimeSelectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressGateway.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressGateway.podSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.plugin.port }}
+    {{- with .Values.networkPolicy.additionalIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.coreGateway.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.coreGateway.podSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.coreGateway.port }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.database.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.database.podSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.database.port }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- with .Values.networkPolicy.additionalEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

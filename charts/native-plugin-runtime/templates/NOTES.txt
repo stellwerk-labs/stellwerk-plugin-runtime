@@ -1,0 +1,9 @@
+{{- if not .Values.enabled }}
+The native plugin runtime is disabled. No workload was created.
+{{- else }}
+Plugin {{ .Values.plugin.id }} {{ .Values.plugin.version }} was configured with
+package {{ .Values.package.reference }} and trust mode {{ .Values.trust.mode }}.
+{{- if eq .Values.trust.mode "development-untrusted" }}
+WARNING: this is an explicitly untrusted development installation.
+{{- end }}
+{{- end }}

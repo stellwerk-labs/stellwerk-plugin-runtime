@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {"type": "boolean"},
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "activeDeadlineSeconds", "backoffLimit", "serviceAccount", "profileSecret", "databaseSecret"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "backoffLimit": {"type": "integer", "minimum": 0, "maximum": 10},
+        "serviceAccount": {"$ref": "#/definitions/serviceAccount"},
+        "profileSecret": {"$ref": "#/definitions/secretKeyReference"},
+        "databaseSecret": {"$ref": "#/definitions/secretKeyReference"},
+        "databaseCASecret": {"$ref": "#/definitions/secretKeyReference"}
+      }
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "port"],
+      "properties": {
+        "id": {"type": "string"},
+        "version": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "ui": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "port", "consoleOrigin", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "consoleOrigin": {"type": "string"},
+        "resources": {"type": "object"},
+        "gateway": {
+          "type": "object", "additionalProperties": false,
+          "required": ["enabled", "className", "hostname", "certificateSecretName", "issuerName", "issuerKind"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "className": {"type": "string"},
+            "hostname": {"type": "string"},
+            "certificateSecretName": {"type": "string"},
+            "issuerName": {"type": "string"},
+            "issuerKind": {"type": "string", "enum": ["Issuer", "ClusterIssuer"]}
+          },
+          "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {
+            "className": {"minLength": 1},
+            "hostname": {"pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"},
+            "certificateSecretName": {"minLength": 1}
+          }}}]
+        }
+      },
+      "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"consoleOrigin": {"pattern": "^https://[^/?#@]+$"}}}}]
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "manifestSHA256", "plainHTTP", "registryConfigSecret"],
+      "properties": {
+        "reference": {"type": "string"},
+        "manifestSHA256": {"type": "string"},
+        "plainHTTP": {"type": "boolean"},
+        "registryConfigSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {"name": {"type": "string"}, "key": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "cosign"],
+      "properties": {
+        "mode": {"enum": ["", "development-untrusted", "cosign-key"]},
+        "cosign": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["publicKeySecret", "signatureBundleSecret"],
+          "properties": {
+            "publicKeySecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "key"],
+              "properties": {"name": {"type": "string"}, "key": {"type": "string", "minLength": 1}}
+            },
+            "signatureBundleSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "key"],
+              "properties": {"name": {"type": "string"}, "key": {"type": "string", "minLength": 1}}
+            }
+          }
+        }
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "oras", "cosign", "pullPolicy", "pullSecrets"],
+      "properties": {
+        "runtime": {"type": "string"},
+        "oras": {"type": "string"},
+        "cosign": {"type": "string"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]},
+        "pullSecrets": {"type": "array", "items": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}, "additionalProperties": false}}
+      }
+    },
+    "serviceAccount": {"type": "object"},
+    "podAnnotations": {"type": "object"},
+    "podLabels": {"type": "object"},
+    "resources": {"type": "object"},
+    "initResources": {"type": "object"},
+    "packageVolume": {"type": "object"},
+    "stateVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizeLimit"],
+      "properties": {"sizeLimit": {"type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi)$"}}
+    },
+    "persistence": {"type": "object"},
+    "service": {"type": "object"},
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "startup", "readiness", "liveness"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$"},
+        "scheme": {"type": "string", "enum": ["HTTP", "HTTPS"]},
+        "startup": {"$ref": "#/definitions/startupProbe"},
+        "readiness": {"$ref": "#/definitions/periodicProbe"},
+        "liveness": {"$ref": "#/definitions/periodicProbe"}
+      }
+    },
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 1},
+    "pluginEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^(STELLWERK_PLUGIN_[A-Z0-9_]+|OTEL_[A-Z0-9_]+|SSL_CERT_FILE)$"},
+          "value": {"type": "string"},
+          "valueFrom": {"type": "object"}
+        },
+        "oneOf": [{"required": ["value"]}, {"required": ["valueFrom"]}],
+        "additionalProperties": false
+      }
+    },
+    "pluginSecretFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "secretName", "mountPath", "items"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+          "secretName": {"type": "string", "minLength": 1},
+          "mountPath": {"type": "string", "pattern": "^/[^/].*"},
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "path"],
+              "properties": {
+                "key": {"type": "string", "minLength": 1},
+                "path": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "ingressGateway", "coreGateway", "database", "dns", "additionalIngress", "additionalEgress"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "ingressGateway": {"$ref": "#/definitions/peer"},
+        "coreGateway": {"$ref": "#/definitions/tcpPeer"},
+        "database": {"$ref": "#/definitions/tcpPeer"},
+        "dns": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["namespaceSelector", "podSelector"],
+          "properties": {
+            "namespaceSelector": {"$ref": "#/definitions/labels"},
+            "podSelector": {"$ref": "#/definitions/labels"}
+          }
+        },
+        "additionalIngress": {"type": "array", "items": {"type": "object"}},
+        "additionalEgress": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "nodeSelector": {"type": "object"},
+    "tolerations": {"type": "array"},
+    "affinity": {"type": "object"}
+  },
+  "definitions": {
+    "periodicProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["periodSeconds"],
+      "properties": {"periodSeconds": {"type": "integer", "minimum": 1, "maximum": 300}}
+    },
+    "startupProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failureThreshold", "periodSeconds"],
+      "properties": {
+        "failureThreshold": {"type": "integer", "minimum": 1, "maximum": 300},
+        "periodSeconds": {"type": "integer", "minimum": 1, "maximum": 300}
+      }
+    },
+    "secretKeyReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "key"],
+      "properties": {
+        "name": {"type": "string"},
+        "key": {"type": "string", "minLength": 1}
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name", "annotations"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"},
+        "annotations": {"type": "object"}
+      }
+    },
+    "labels": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespaceSelector", "podSelector"],
+      "properties": {
+        "namespaceSelector": {"$ref": "#/definitions/labels"},
+        "podSelector": {"$ref": "#/definitions/labels"}
+      }
+    },
+    "tcpPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespaceSelector", "podSelector", "port"],
+      "properties": {
+        "namespaceSelector": {"$ref": "#/definitions/labels"},
+        "podSelector": {"$ref": "#/definitions/labels"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "id": {"pattern": "^[a-z0-9]+([.-][a-z0-9]+)+$"},
+              "version": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.-]+)?$"}
+            }
+          },
+          "package": {
+            "properties": {
+              "reference": {"pattern": "@sha256:[0-9a-f]{64}$"},
+              "manifestSHA256": {"pattern": "^[0-9a-f]{64}$"}
+            }
+          },
+          "images": {
+            "properties": {
+              "runtime": {"pattern": "@sha256:[0-9a-f]{64}$"},
+              "oras": {"pattern": "@sha256:[0-9a-f]{64}$"}
+            }
+          },
+          "trust": {"properties": {"mode": {"enum": ["development-untrusted", "cosign-key"]}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"trust": {"properties": {"mode": {"const": "cosign-key"}}}}},
+      "then": {
+        "properties": {
+          "images": {"properties": {"cosign": {"pattern": "@sha256:[0-9a-f]{64}$"}}},
+          "trust": {"properties": {"cosign": {"properties": {
+            "publicKeySecret": {"properties": {"name": {"minLength": 1}}},
+            "signatureBundleSecret": {"properties": {"name": {"minLength": 1}}}
+          }}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"migration": {"properties": {"enabled": {"const": true}}}}},
+      "then": {
+        "properties": {
+          "migration": {
+            "properties": {
+              "profileSecret": {"properties": {"name": {"minLength": 1}}},
+              "databaseSecret": {"properties": {"name": {"minLength": 1}}}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

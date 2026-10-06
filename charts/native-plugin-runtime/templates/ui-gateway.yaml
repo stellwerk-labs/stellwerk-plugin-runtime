@@ -1,0 +1,83 @@
+{{- if and .Values.enabled .Values.runtime.enabled .Values.ui.enabled .Values.ui.gateway.enabled }}
+{{- $name := printf "%s-ui" (include "native-plugin-runtime.fullname" .) }}
+{{- $consoleHost := regexReplaceAll ":[0-9]+$" (get (urlParse .Values.ui.consoleOrigin) "host") "" }}
+{{- if eq (lower $consoleHost) (lower .Values.ui.gateway.hostname) }}
+{{- fail "Console and plugin UI Gateway require separate hostnames" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "native-plugin-runtime.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ .Values.ui.gateway.className }}
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostname: {{ .Values.ui.gateway.hostname | quote }}
+      allowedRoutes:
+        namespaces: {from: Same}
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: {{ .Values.ui.gateway.hostname | quote }}
+      allowedRoutes:
+        namespaces: {from: Same}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.ui.gateway.certificateSecretName }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "native-plugin-runtime.labels" . | nindent 4 }}
+spec:
+  hostnames: [{{ .Values.ui.gateway.hostname | quote }}]
+  parentRefs:
+    - name: {{ $name }}
+      sectionName: https
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /embed/}
+      backendRefs:
+        - name: {{ include "native-plugin-runtime.fullname" . }}
+          port: {{ .Values.ui.port }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}-redirect
+  labels:
+    {{- include "native-plugin-runtime.labels" . | nindent 4 }}
+spec:
+  hostnames: [{{ .Values.ui.gateway.hostname | quote }}]
+  parentRefs:
+    - name: {{ $name }}
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect: {scheme: https, statusCode: 301}
+{{- if .Values.ui.gateway.issuerName }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "native-plugin-runtime.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.ui.gateway.certificateSecretName }}
+  dnsNames: [{{ .Values.ui.gateway.hostname | quote }}]
+  issuerRef:
+    name: {{ .Values.ui.gateway.issuerName }}
+    kind: {{ .Values.ui.gateway.issuerKind }}
+    group: cert-manager.io
+{{- end }}
+{{- end }}

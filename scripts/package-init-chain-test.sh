@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Qualify the chart's signed-package init sequence without touching a live
-# installation. A disposable key signs the probe package; the package travels
-# through the offline bundle into a short-lived local registry. Only the
+# installation. A disposable key signs the probe package; the package output
+# travels as an archive into a short-lived local registry. Only the
 # pinned image pulls and the registry hops use networking; key generation,
 # signing and every verification stage run with --network none.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -82,10 +82,13 @@ json.dump(unsigned, open(f"{forged}/unsigned/sbom.sigstore.json", "w", encoding=
 json.dump(tampered, open(f"{forged}/tampered/provenance.sigstore.json", "w", encoding="utf-8"))
 PY
 
-# Offline transfer: bundle, unpack elsewhere, verify before anything is pushed.
-"$root/scripts/offline-bundle.sh" "$workspace/source" "$workspace/bundle.tar" >/dev/null
+# Package transfer: archive the package output, unpack it elsewhere and
+# verify it before anything is pushed. (A customer receives the complete
+# offline bundle instead; offline-bundle-test.sh covers that.)
+tar -C "$workspace/source" -cf "$workspace/package.tar" \
+  oci-layout release.json oci-manifest.json oci-manifest.sigstore.json
 mkdir "$workspace/transfer"
-tar -C "$workspace/transfer" -xf "$workspace/bundle.tar"
+tar -C "$workspace/transfer" -xf "$workspace/package.tar"
 if ! output="$("$root/scripts/verify-layout-manifest.sh" "$workspace/transfer" "$workspace/approved/cosign.pub" 2>&1)" ||
   [[ "$output" != *"Offline signature, 2 attestations and OCI content verified."* ]]; then
   printf 'offline verification of the signed and attested package failed: %s\n' "$output" >&2

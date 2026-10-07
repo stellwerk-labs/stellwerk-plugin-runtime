@@ -177,7 +177,6 @@ with networking disabled:
 ./scripts/sign-layout-manifest.sh "$output" /path/to/cosign.key
 ./scripts/attest-layout-manifest.sh "$output" /path/to/cosign.key sbom.spdx.json
 ./scripts/verify-layout-manifest.sh "$output" /path/to/cosign.pub
-./scripts/offline-bundle.sh "$output" package.tar   # air-gapped transfer
 oras cp -r --from-oci-layout "$output/oci-layout:1.0.0" registry.example/native-probe:1.0.0
 ```
 
@@ -363,6 +362,83 @@ plugin container  STELLWERK_CORE_TOKEN_FILE, read per request, read-only mount
   stays available for the plugin's own shutdown. A deleted Pod's token stays
   valid at IAM until it expires (at most 15 minutes).
 
+## Offline bundle
+
+An air-gapped customer receives one directory per plugin release and
+installs it without any vendor network:
+
+```text
+bundle/
+├── bundle.json           plugin, minimum Core and chart versions, every component's digest
+├── bundle.sigstore.json  publisher signature over bundle.json (managed-key-no-tlog)
+├── publishers.json       the public trust bootstrap
+└── oci/                  one OCI image layout; index.json lists exactly:
+    ├── package           the signed package and its signature, SBOM and provenance referrers
+    ├── runtime           runtime image index: linux/amd64 and linux/arm64
+    ├── oras, cosign      the chart's fetch and verify images, same two platforms
+    └── chart             native-plugin-runtime, as the OCI artifact `helm push` writes
+```
+
+The licence (entitlement) is delivered separately and is never part of a
+bundle; no sources are included. The ORAS and Cosign indexes hold the
+upstream linux/amd64 and linux/arm64 manifests of the indexes pinned in
+`scripts/images.sh`, with their digests unchanged.
+
+The publisher builds it online from a signed and attested package:
+
+```sh
+digest="$(./scripts/build-runtime-image.sh runtime-layout)"
+./scripts/offline-bundle.sh --package "$output" --runtime-image "runtime-layout@$digest" \
+  --key cosign.key --trust-bootstrap publishers.json --minimum-core-version 1.0.0 bundle
+```
+
+`--minimum-chart-version` defaults to the bundled chart's version. The
+builder signs `bundle.json` like a package and verifies the result exactly
+as the import will.
+
+The customer imports it offline into the registry the cluster uses:
+
+```sh
+./scripts/import-offline-bundle.sh bundle registry.customer.example/stellwerk \
+  --trust-bootstrap-digest sha256:<from the delivery note> --out import
+```
+
+The trust bootstrap digest reaches the operator out of band, with the
+licence; it is what makes the bundle's `publishers.json` authentic. Before
+anything is pushed, the runtime's `verify-bundle` checks without network:
+
+- the publisher pinned for the plugin under `managed-key-no-tlog` signed
+  `bundle.json` with a pinned, valid and unrevoked key;
+- the bundle holds exactly the expected files and no symlinks, its OCI index
+  lists exactly the recorded components and referrers, every blob matches
+  its digest and size, and no unreferenced blob is present;
+- the package passes the envelope check, its plugin manifest names the
+  recorded plugin and version, and its signature, SBOM and provenance verify
+  as one release set, as in the chart's publisher gate;
+- each image index holds exactly linux/amd64 and linux/arm64 (arm64 may say
+  `v8`), and each platform manifest's configuration agrees;
+- the chart is `native-plugin-runtime` at the recorded version, not older
+  than the minimum.
+
+Then ORAS copies each component with its referrers (`oras cp -r`), so every
+digest is kept, into `<registry>/<pluginId>`, `/native-plugin-runtime`,
+`/oras`, `/cosign` and `/charts/native-plugin-runtime`. Each gets the tag
+`<pluginId>-<version>`, which keeps untagged-manifest garbage collection away
+from it; the import refuses to move such a tag to another digest. Finally it
+re-reads the registry (tags, platform manifests, the package's referrer set)
+and prints the installation steps. `--out` receives `values.json` (plugin,
+package reference and attestation digests, images by digest, `trust.mode`,
+Secret names), `publishers.json` and `oci-manifest.sigstore.json` for the
+trust Secrets, and `instructions.txt`. The operator adds
+`networkPolicy.registryMirrors` and, when needed, the migration Secrets.
+
+`--plain-http`, `--registry-config` and `--ca-file` configure the target
+registry. `--verifier` takes a trusted runtime binary; without it the script
+builds one from this checkout with Go, since the bundle's own runtime image
+cannot vouch for itself. The script is POSIX sh and otherwise needs only
+ORAS: `offline-bundle-test.sh` runs it in the pinned ORAS image on a Docker
+network whose only peer is the registry.
+
 ## Building the runtime image
 
 The image is `FROM scratch` with one static binary and runs as UID 65532.
@@ -389,7 +465,7 @@ Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
 ```sh
 ./scripts/check.sh                  # gofmt, go test -race, go vet, Linux execution tests, chart contract, package build
 ./scripts/compose-test.sh           # run and serve-ui as non-root PID 1, filtered environment, state, CSP, exit 0 on SIGTERM
-./scripts/package-init-chain-test.sh  # sign, attest, bundle, publish locally, run the chart init chain, negatives
+./scripts/package-init-chain-test.sh  # sign, attest, transfer, publish locally, run the chart init chain, negatives
 ./scripts/kind-test.sh development  # untrusted profile: install, package upgrade, restart, rollback on a throwaway kind cluster
 ./scripts/kind-test.sh production   # managed-key-no-tlog from Secrets, two replicas, PDB, both migration paths, rolling upgrade
 ```

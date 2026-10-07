@@ -54,7 +54,13 @@ func verifyEnvelope(args []string) error {
 	if err != nil {
 		return err
 	}
-	if "sha256:"+digest(data) != *packageDigest {
+	return checkEnvelope(data, *packageDigest, *manifestHash)
+}
+
+// checkEnvelope binds OCI manifest bytes to the package digest and the
+// plugin manifest hash and admits only the layers of the package format.
+func checkEnvelope(data []byte, packageDigest, manifestHash string) error {
+	if "sha256:"+digest(data) != packageDigest {
 		return errors.New("OCI envelope digest does not match package reference")
 	}
 	var envelope struct {
@@ -70,7 +76,7 @@ func verifyEnvelope(args []string) error {
 	if envelope.SchemaVersion != 2 || envelope.ArtifactType != packageArtifactType {
 		return errors.New("unsupported OCI package envelope")
 	}
-	return checkLayers(envelope.Layers, *manifestHash)
+	return checkLayers(envelope.Layers, manifestHash)
 }
 
 func validDigest(value string) bool {

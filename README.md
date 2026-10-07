@@ -59,6 +59,7 @@ uncommitted changes, and the Go version.
 | Command | Purpose |
 |---|---|
 | `verify-publisher` | Apply the operator's trust bootstrap: accept bundles without transparency-log inclusion only for a publisher pinned with `managed-key-no-tlog`, verify the package signature and the SBOM and provenance attestations offline as one release set and write each part's pinned key for Cosign (`--key-dir`). |
+| `verify-bundle` | Verify an offline bundle completely offline against the operator-pinned trust bootstrap digest and, with `--registry` and `--out`, write the import plan and chart values (see Offline bundle). |
 | `verify-envelope` | Before any content is pulled, bind the fetched OCI manifest to the pinned package digest and the operator-approved plugin manifest hash, and admit only the layers of the package format. |
 | `validate` | Verify the plugin manifest, selected executable and UI assets against their digests and write a read-only validation receipt. |
 | `run` | Re-verify package and receipt, then execute the verified bytes from a sealed in-memory copy. |

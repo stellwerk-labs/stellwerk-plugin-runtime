@@ -71,11 +71,15 @@ func publisherKeyID(der []byte) string {
 }
 
 func loadTrustBootstrap(path string) (trustBootstrap, error) {
-	var bootstrap trustBootstrap
 	data, err := boundedRegularFile(path, trustBootstrapLimit)
 	if err != nil {
-		return bootstrap, fmt.Errorf("trust bootstrap unavailable: %w", err)
+		return trustBootstrap{}, fmt.Errorf("trust bootstrap unavailable: %w", err)
 	}
+	return parseTrustBootstrap(data)
+}
+
+func parseTrustBootstrap(data []byte) (trustBootstrap, error) {
+	var bootstrap trustBootstrap
 	if err := decodeStrict(data, &bootstrap); err != nil {
 		return bootstrap, fmt.Errorf("trust bootstrap: %w", err)
 	}

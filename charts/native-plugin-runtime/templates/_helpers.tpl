@@ -96,7 +96,8 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /package
     {{- if .Values.package.registryConfigSecret.name }}
     - name: registry-config
-      mountPath: /registry
+      mountPath: /registry/config.json
+      subPath: config.json
       readOnly: true
     {{- end }}
     - name: temporary
@@ -151,7 +152,8 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /attestations
     {{- if $.Values.package.registryConfigSecret.name }}
     - name: registry-config
-      mountPath: /registry
+      mountPath: /registry/config.json
+      subPath: config.json
       readOnly: true
     {{- end }}
     - name: temporary
@@ -192,10 +194,12 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /package
       readOnly: true
     - name: trust
-      mountPath: /trust
+      mountPath: /trust/publishers.json
+      subPath: publishers.json
       readOnly: true
     - name: signature-bundle
-      mountPath: /signature
+      mountPath: /signature/oci-manifest.sigstore.json
+      subPath: oci-manifest.sigstore.json
       readOnly: true
     - name: attestations
       mountPath: /attestations
@@ -228,7 +232,8 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /verify
       readOnly: true
     - name: signature-bundle
-      mountPath: /signature
+      mountPath: /signature/oci-manifest.sigstore.json
+      subPath: oci-manifest.sigstore.json
       readOnly: true
     - name: temporary
       mountPath: /tmp
@@ -292,7 +297,8 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /package
     {{- if .Values.package.registryConfigSecret.name }}
     - name: registry-config
-      mountPath: /registry
+      mountPath: /registry/config.json
+      subPath: config.json
       readOnly: true
     {{- end }}
     - name: temporary
@@ -316,6 +322,13 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /package
 {{- end -}}
 
+{{/* The operator's Secrets (trust bootstrap, signature bundle, registry
+config) are mounted file by file with subPath. A Secret volume exposes each
+key as a symlink into its ..data directory, and the runtime opens its inputs
+with O_NOFOLLOW; a subPath mount is the plain file itself. subPath mounts do
+not follow later Secret updates, which costs nothing here: the init chain
+reads them once at Pod start, so a trust change applies on the next Pod
+start (rollout restart). */}}
 {{- define "native-plugin-runtime.fetchVolumes" -}}
 {{- $managedKey := eq .Values.trust.mode "managed-key-no-tlog" }}
 {{- if $managedKey }}

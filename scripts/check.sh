@@ -320,6 +320,14 @@ for path in sys.argv[1:]:
             assert argument in cosign, (path, name, argument)
         assert re.search(r"- name: attestations\n\s+mountPath: /attestations\n\s+readOnly: true", cosign), (path, name)
     assert re.search(r"- name: attestations\n\s+mountPath: /attestations\n\s+readOnly: true", gate)
+    # Kubelet exposes Secret keys as symlinks into ..data and the runtime
+    # refuses symlinks, so the operator's files are mounted as plain files.
+    trust = r"- name: trust\n\s+mountPath: /trust/publishers.json\n\s+subPath: publishers.json\n\s+readOnly: true\n"
+    bundle = (r"- name: signature-bundle\n\s+mountPath: /signature/oci-manifest.sigstore.json\n"
+              r"\s+subPath: oci-manifest.sigstore.json\n\s+readOnly: true\n")
+    assert re.search(trust, gate) and re.search(bundle, gate), path
+    assert re.search(bundle, init_blocks["verify-package-signature"]), path
+    assert not re.search(r"mountPath: /(trust|signature)\n", init), path
     assert "- --trust-state=verified-local-key" in init_blocks["validate-package"]
     assert "--installed-digest" not in pod, "no installation recorded in this render"
     # Trust material and registry access stay in their init containers.
@@ -637,6 +645,9 @@ for path in sys.argv[1:]:
         assert "secretName: registry-pull" in pod and "registry-config" in init
         for name, body in re.findall(r"^        - name: ([a-z-]+)\n((?:(?:          .*)?\n)*)", init, re.M):
             assert ("name: registry-config" in body) == (name in {"fetch-package-envelope", "pull-package"}), (path, name)
+            if "name: registry-config" in body:
+                assert re.search(r"- name: registry-config\n\s+mountPath: /registry/config.json\n"
+                                 r"\s+subPath: config.json\n\s+readOnly: true\n", body), (path, name)
 PY
 for broad in '[{"cidr":"0.0.0.0/0","port":443}]' '[{"cidr":"10.0.0.0/8","port":443}]' '[{"cidr":"203.0.113.10/32"}]' \
   '[{"namespaceSelector":{"kubernetes.io/metadata.name":"registry-mirror"},"port":5000}]' \

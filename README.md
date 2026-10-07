@@ -148,6 +148,12 @@ package:
   overlapping windows allow rotation.
 - `revokedKeyIds` (top level, key hints) is the compromise list: a revoked
   key blocks new installations and re-fetches of installed digests alike.
+- Verification happens at Pod start, so a changed bootstrap (rotation,
+  revocation) applies to Pods started after the change; restart the runtime
+  (`kubectl rollout restart`) to apply it at once. The chart mounts the
+  bootstrap, the signature bundle and the registry config as plain files
+  (`subPath`): the runtime refuses symlinks, and a Secret volume exposes
+  every key as one.
 - A release set is the package signature plus signed in-toto attestations
   about the package digest: an SPDX 2 JSON SBOM (`https://spdx.dev/Document`)
   and the source provenance. Each is a Sigstore v0.3 DSSE bundle signed with

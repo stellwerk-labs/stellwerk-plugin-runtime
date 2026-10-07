@@ -85,7 +85,9 @@ trust:
   # Authentic trust bootstrap (publishers.json): publishers, their policy,
   # plugin IDs, pinned keys with validity and the revokedKeyIds compromise
   # list. Delivered by the operator, never taken from a package. Mounted only
-  # into the verify-package-publisher init container.
+  # into the verify-package-publisher init container. Read at Pod start: a
+  # changed bootstrap (rotation, revocation) applies to Pods started after
+  # the change, so roll the Deployment to apply it.
   bootstrapSecret:
     name: ""
     key: publishers.json

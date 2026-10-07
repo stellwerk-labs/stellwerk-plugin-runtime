@@ -116,6 +116,9 @@ jobs:
       - name: Test the package init chain
         run: ./scripts/package-init-chain-test.sh
 
+      - name: Build an offline bundle, import it without egress, refuse tampered ones
+        run: ./scripts/offline-bundle-test.sh
+
       - name: Install, upgrade, restart and roll back on kind (development profile)
         run: ./scripts/kind-test.sh development
 

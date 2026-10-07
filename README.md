@@ -466,6 +466,7 @@ Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
 ./scripts/check.sh                  # gofmt, go test -race, go vet, Linux execution tests, chart contract, package build
 ./scripts/compose-test.sh           # run and serve-ui as non-root PID 1, filtered environment, state, CSP, exit 0 on SIGTERM
 ./scripts/package-init-chain-test.sh  # sign, attest, transfer, publish locally, run the chart init chain, negatives
+./scripts/offline-bundle-test.sh    # build a bundle, import it without egress, digests and referrers kept, tampered bundles refused
 ./scripts/kind-test.sh development  # untrusted profile: install, package upgrade, restart, rollback on a throwaway kind cluster
 ./scripts/kind-test.sh production   # managed-key-no-tlog from Secrets, two replicas, PDB, both migration paths, rolling upgrade
 ```

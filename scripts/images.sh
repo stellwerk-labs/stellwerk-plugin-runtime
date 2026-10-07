@@ -110,3 +110,31 @@ with open(output, "w", encoding="utf-8") as file:
     json.dump({"schemaVersion": 1, "publishers": [{"id": "stellwerk", "policy": policy, "pluginIds": [plugin_id], "keys": [key]}]}, file)
 PY
 }
+
+# airgap_import NETWORK REGISTRY/PREFIX BUNDLE VERIFIER OUT PIN [probe] runs
+# import-offline-bundle.sh in the pinned ORAS image (busybox sh and ORAS
+# only), attached to NETWORK alone, which should be an internal network whose
+# only peer is the registry. VERIFIER is a Linux runtime binary for the Docker
+# platform. With "probe" the container first proves that it reaches the
+# registry and nothing else: no route to a public address, no public name.
+airgap_import() {
+  local network="$1" registry="$2" bundle="$3" verifier="$4" out="$5" pin="$6" probe="${7:-}"
+  # shellcheck disable=SC2016 # the container's shell expands the script
+  timeout -k 5s 120s docker run --rm --pull=never --network "$network" --read-only \
+    --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+    --tmpfs /tmp:rw,nosuid,size=16m --env HOME=/tmp --env "REGISTRY_HOST=${registry%%/*}" --env "PROBE=$probe" \
+    --mount "type=bind,src=$bundle,dst=/bundle,readonly" \
+    --mount "type=bind,src=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd),dst=/scripts,readonly" \
+    --mount "type=bind,src=$(dirname "$verifier"),dst=/verifier,readonly" \
+    --mount "type=bind,src=$out,dst=/out" \
+    --entrypoint /bin/sh "$oras_image" -c '
+      if [ -n "$PROBE" ]; then
+        wget -q -T 5 -O /dev/null "http://$REGISTRY_HOST/v2/" ||
+          { echo "the import container cannot reach $REGISTRY_HOST" >&2; exit 96; }
+        for target in http://1.1.1.1/ https://ghcr.io/v2/ https://registry-1.docker.io/v2/; do
+          if wget -q -T 5 -O /dev/null "$target" 2>/dev/null; then echo "the import container reached $target" >&2; exit 97; fi
+        done
+      fi
+      exec /bin/sh /scripts/import-offline-bundle.sh "$@"' import-offline-bundle \
+    /bundle "$registry" --trust-bootstrap-digest "$pin" --plain-http --verifier "/verifier/$(basename "$verifier")" --out /out
+}

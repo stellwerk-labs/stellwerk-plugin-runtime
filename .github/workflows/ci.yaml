@@ -116,5 +116,8 @@ jobs:
       - name: Test the package init chain
         run: ./scripts/package-init-chain-test.sh
 
-      - name: Install, upgrade, restart and roll back on kind
-        run: ./scripts/kind-test.sh
+      - name: Install, upgrade, restart and roll back on kind (development profile)
+        run: ./scripts/kind-test.sh development
+
+      - name: Signed packages, two replicas and migration phases on kind (production trust)
+        run: ./scripts/kind-test.sh production

@@ -121,7 +121,6 @@ grep -Fq 'path: profile.json' "$fixture/secret-rendered.yaml"
 migration_args=(
   --set enabled=true
   --set-string trust.mode=development-untrusted
-  --set runtime.enabled=false
   --set migration.enabled=true
   --set-string plugin.id=dev.stellwerk.native-probe
   --set-string plugin.version=1.0.0
@@ -132,16 +131,17 @@ migration_args=(
   --set-string migration.profileSecret.name=plugin-migration-profile
   --set-string migration.databaseSecret.name=plugin-migration-database
 )
+# The migration phase also renders the held runtime (see the installer phase
+# checks below); these checks look at the migration Job and its policy.
+migration_job=(--show-only templates/migration-job.yaml --show-only templates/migration-networkpolicy.yaml)
 helm lint charts/native-plugin-runtime "${migration_args[@]}"
-helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" >"$fixture/migration-rendered.yaml"
+helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" "${migration_job[@]}" >"$fixture/migration-rendered.yaml"
 python3 - "$fixture/migration-rendered.yaml" <<'PY'
 import re
 import sys
 
 rendered = open(sys.argv[1], encoding="utf-8").read()
 assert re.search(r"^kind: Job$", rendered, re.M)
-assert not re.search(r"^kind: Deployment$", rendered, re.M)
-assert not re.search(r"^kind: Service$", rendered, re.M)
 assert "app.kubernetes.io/component: migration" in rendered
 assert "name: STELLWERK_PLUGIN_CONFIG_FILE" in rendered
 assert "value: /run/secrets/stellwerk-plugin-migration/profile.json" in rendered
@@ -160,7 +160,7 @@ assert "owning-gateway" not in policy
 assert "migration-database-ca" not in rendered
 PY
 
-helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" \
+helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" "${migration_job[@]}" \
   --set-string migration.databaseCASecret.name=public-database-ca \
   --set-string migration.databaseCASecret.key=trust.pem >"$fixture/migration-ca.yaml"
 python3 - "$fixture/migration-ca.yaml" <<'PY'
@@ -175,7 +175,6 @@ assert "mountPath: /run/config/database-ca" in executor
 assert "secretName: public-database-ca" in executor
 assert "key: trust.pem" in executor and "path: ca.crt" in executor
 assert "readOnly: true" in executor
-assert not re.search(r"^kind: Deployment$", rendered, re.M)
 PY
 for invalid_ca in name=plugin-migration-profile name=plugin-migration-database key= unknown=true; do
   if helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" \
@@ -185,16 +184,10 @@ for invalid_ca in name=plugin-migration-profile name=plugin-migration-database k
   fi
 done
 helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" \
-  --set migration.enabled=false --set runtime.enabled=true \
+  --set migration.enabled=false \
   --set-string migration.databaseCASecret.name=public-database-ca >"$fixture/runtime-without-migration-ca.yaml"
 if grep -Fq 'public-database-ca' "$fixture/runtime-without-migration-ca.yaml"; then
   echo "runtime inherited the migration-only database CA" >&2
-  exit 1
-fi
-
-if helm template native-probe charts/native-plugin-runtime \
-  "${migration_args[@]}" --set runtime.enabled=true >/dev/null 2>&1; then
-  echo "chart allowed runtime and migration phases concurrently" >&2
   exit 1
 fi
 
@@ -211,6 +204,104 @@ if helm template native-probe charts/native-plugin-runtime \
   echo "chart allowed the migration database Secret in the runtime container" >&2
   exit 1
 fi
+
+# Replicas and installer phases. One replica is replaced (Recreate); several
+# roll one at a time behind a PodDisruptionBudget and prefer distinct nodes.
+# The migration phase pauses the runtime Deployment, so no runtime Pod runs a
+# package before its migration Job succeeded: expand-only keeps the previous
+# replicas serving, incompatible scales them to zero.
+runtime_args=("${migration_args[@]}" --set migration.enabled=false)
+render_phase() {
+  local output="$1"
+  shift
+  helm template native-probe charts/native-plugin-runtime "$@" >"$output"
+}
+render_phase "$fixture/phase-single.yaml" "${runtime_args[@]}"
+render_phase "$fixture/phase-runtime.yaml" "${runtime_args[@]}" --set replicaCount=3
+render_phase "$fixture/phase-runtime-incompatible.yaml" "${runtime_args[@]}" --set replicaCount=3 \
+  --set-string migration.compatibility=incompatible
+render_phase "$fixture/phase-expand.yaml" "${migration_args[@]}" --set replicaCount=3
+render_phase "$fixture/phase-incompatible.yaml" "${migration_args[@]}" --set replicaCount=3 \
+  --set-string migration.compatibility=incompatible
+render_phase "$fixture/phase-affinity.yaml" "${runtime_args[@]}" --set replicaCount=2 \
+  --set-json 'affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"pool","operator":"In","values":["plugins"]}]}]}}}'
+render_phase "$fixture/phase-persistent.yaml" "${migration_args[@]}" --set persistence.enabled=true
+python3 - "$fixture" <<'PY'
+import re
+import sys
+
+fixture = sys.argv[1]
+
+
+def documents(name):
+    rendered = open(f"{fixture}/{name}.yaml", encoding="utf-8").read()
+    return {re.search(r"^kind: (\w+)$", doc, re.M).group(1) + "/" + re.search(r"^  name: (\S+)$", doc, re.M).group(1): doc
+            for doc in rendered.split("\n---") if re.search(r"^kind: ", doc, re.M)}
+
+
+def spec(deployment):
+    return deployment.split("\nspec:\n", 1)[1].split("\n  template:\n", 1)[0]
+
+
+name = "native-probe-native-plugin-runtime"
+runtime_labels = ("app.kubernetes.io/name: native-plugin-runtime\n", "app.kubernetes.io/instance: native-probe\n",
+                  "app.kubernetes.io/component: runtime\n")
+
+single = documents("phase-single")
+head = spec(single[f"Deployment/{name}"])
+assert "  paused: false\n  replicas: 1\n" in head, head
+assert "    type: Recreate\n" in head and "rollingUpdate" not in head, head
+assert "affinity:" not in single[f"Deployment/{name}"]
+assert not any(key.startswith("PodDisruptionBudget/") for key in single), list(single)
+assert not any(key.startswith("Job/") for key in single), list(single)
+
+for variant in ["phase-runtime", "phase-runtime-incompatible"]:
+    rendered = documents(variant)
+    deployment = rendered[f"Deployment/{name}"]
+    head = spec(deployment)
+    # The compatibility switch acts only while the migration phase runs.
+    assert "  paused: false\n  replicas: 3\n" in head, (variant, head)
+    assert "    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n      maxSurge: 1\n" in head, (variant, head)
+    affinity = deployment.split("      affinity:\n", 1)[1]
+    assert re.match(r"        podAntiAffinity:\n          preferredDuringSchedulingIgnoredDuringExecution:\n"
+                    r"            - weight: 100\n              podAffinityTerm:\n"
+                    r"                topologyKey: kubernetes.io/hostname\n", affinity), (variant, affinity)
+    assert "requiredDuringScheduling" not in affinity, variant
+    term = affinity.split("matchLabels:\n", 1)[1]
+    assert all(label in term for label in runtime_labels), (variant, term)
+    budget = rendered[f"PodDisruptionBudget/{name}"]
+    assert "apiVersion: policy/v1\n" in budget
+    assert "  minAvailable: 1\n" in budget and "maxUnavailable" not in budget, budget
+    assert "  unhealthyPodEvictionPolicy: AlwaysAllow\n" in budget, budget
+    assert all(label in budget.split("  selector:\n", 1)[1] for label in runtime_labels), budget
+    assert not any(key.startswith("Job/") for key in rendered), (variant, list(rendered))
+
+custom = documents("phase-affinity")[f"Deployment/{name}"]
+assert "nodeAffinity:" in custom and "podAntiAffinity" not in custom, "an explicit affinity replaces the default spread"
+
+expand, incompatible = documents("phase-expand"), documents("phase-incompatible")
+assert "  paused: true\n  replicas: 3\n" in spec(expand[f"Deployment/{name}"]), "expand-only keeps the previous replicas"
+assert "  paused: true\n  replicas: 0\n" in spec(incompatible[f"Deployment/{name}"]), "incompatible stops the runtime"
+for rendered in (expand, incompatible):
+    # The phase holds the runtime instead of deleting it: its Service, policy,
+    # budget and identity stay, and the Job runs next to it.
+    for key in [f"Job/{name}-migration", f"Service/{name}", f"NetworkPolicy/{name}", f"NetworkPolicy/{name}-migration",
+                f"ServiceAccount/{name}", f"ServiceAccount/{name}-migration", f"PodDisruptionBudget/{name}"]:
+        assert key in rendered, (key, list(rendered))
+    assert "app.kubernetes.io/component: runtime" not in rendered[f"Job/{name}-migration"]
+
+# A migration phase keeps the single replica's state claim.
+persistent = documents("phase-persistent")
+assert f"PersistentVolumeClaim/{name}-state" in persistent, list(persistent)
+assert f"claimName: {name}-state" in persistent[f"Deployment/{name}"]
+PY
+for invalid in "--set=replicaCount=0" "--set=replicaCount=2,persistence.enabled=true" \
+  "--set-string=migration.compatibility=breaking" "--set=runtime.enabled=false"; do
+  if helm template native-probe charts/native-plugin-runtime "${runtime_args[@]}" "$invalid" >/dev/null 2>&1; then
+    echo "chart accepted replica or phase setting $invalid" >&2
+    exit 1
+  fi
+done
 
 if grep -Fq 'EXPERIMENT_AMBIENT_CANARY' "$fixture/rendered.yaml"; then
   echo "ambient test value leaked into rendered workload" >&2
@@ -273,7 +364,7 @@ if helm template native-probe charts/native-plugin-runtime "${migration_args[@]}
 fi
 
 helm template native-probe charts/native-plugin-runtime \
-  "${migration_args[@]}" \
+  "${migration_args[@]}" "${migration_job[@]}" \
   --set-string trust.mode=managed-key-no-tlog \
   --set-string trust.bootstrapSecret.name=fixture-trust \
   --set-string trust.signatureBundleSecret.name=fixture-bundle \
@@ -358,7 +449,7 @@ PY
 installed_args=("${migration_args[@]}" --set-string trust.mode=managed-key-no-tlog
   --set-string trust.bootstrapSecret.name=fixture-trust --set-string trust.signatureBundleSecret.name=fixture-bundle
   --set-string images.cosign=registry.invalid/cosign@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd)
-helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" \
+helm template native-probe charts/native-plugin-runtime "${installed_args[@]}" "${migration_job[@]}" \
   --set-string package.installedDigest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$fixture/installed.yaml"
 test "$(grep -c -- '--installed-digest=' "$fixture/installed.yaml")" -eq 1
 # Without configured attestations nothing is fetched for them and the gate
@@ -579,7 +670,7 @@ assert "secretName: gateway-ca" in volume_blocks["gateway-ca"] and "defaultMode:
 assert "      serviceAccountName: native-ui-native-plugin-runtime\n" in deployment
 assert "      automountServiceAccountToken: false\n" in deployment
 PY
-helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" \
+helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" "${migration_job[@]}" \
   --set workloadIdentity.enabled=true --set-string workloadIdentity.audience=stellwerk-plugin-workload \
   --set-string workloadIdentity.gateway.url=https://api.example.test >"$fixture/migration-workload.yaml"
 if grep -E -q 'core-token|serviceAccountToken' "$fixture/migration-workload.yaml"; then
@@ -610,7 +701,7 @@ mirrors='[{"cidr":"203.0.113.10/32","port":5000},{"namespaceSelector":{"kubernet
 helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
   --set-string package.registryConfigSecret.name=registry-pull \
   --set-json "networkPolicy.registryMirrors=$mirrors" >"$fixture/egress-runtime.yaml"
-helm template native-ui charts/native-plugin-runtime "${migration_args[@]}" \
+helm template native-ui charts/native-plugin-runtime "${migration_args[@]}" "${migration_job[@]}" \
   --set-string package.registryConfigSecret.name=registry-pull \
   --set-json "networkPolicy.registryMirrors=$mirrors" >"$fixture/egress-migration.yaml"
 python3 - "$fixture/egress-runtime.yaml" "$fixture/egress-migration.yaml" "$fixture/workload.yaml" <<'PY'

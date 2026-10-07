@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -27,6 +28,11 @@ func main() {
 	}
 	if err := os.MkdirAll(stateDirectory, 0700); err != nil {
 		os.Exit(1)
+	}
+	if migrationProfile() {
+		// The probe has no schema: migrating reports the version and succeeds.
+		fmt.Printf("migrated to %s\n", version)
+		return
 	}
 	notePath := filepath.Join(stateDirectory, "note")
 	var mutex sync.Mutex
@@ -74,4 +80,24 @@ func main() {
 		os.Exit(1)
 	}
 	<-done
+}
+
+// migrationProfile reports whether the plugin profile selects the migration
+// mode a migration Job hands the plugin.
+func migrationProfile() bool {
+	path := os.Getenv("STELLWERK_PLUGIN_CONFIG_FILE")
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		os.Exit(1)
+	}
+	var profile struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(data, &profile); err != nil {
+		os.Exit(1)
+	}
+	return profile.Mode == "native-migrate"
 }

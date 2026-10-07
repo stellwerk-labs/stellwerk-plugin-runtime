@@ -20,14 +20,6 @@ esac
 for image in "$oras_image" "$cosign_image" "$registry_image"; do
   require_image "$image" "$platform"
 done
-# quiet hides a step's progress chatter but replays it when the step fails.
-quiet() {
-  local output
-  if ! output="$("$@" 2>&1)"; then
-    printf '%s\n' "$output" >&2
-    return 1
-  fi
-}
 
 workspace="$(mktemp -d "${TMPDIR:-/tmp}/package-init-chain.XXXXXX")"
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
@@ -62,17 +54,6 @@ if cmp -s "$workspace/approved/cosign.pub" "$workspace/wrong/cosign.pub"; then
   exit 1
 fi
 COSIGN_PASSWORD='' quiet "$root/scripts/sign-layout-manifest.sh" "$workspace/source" "$workspace/approved/cosign.key"
-# The publisher's SBOM generator is outside this repository; a minimal SPDX 2
-# document of the package stands in for its output.
-sbom_fixture() {
-  jq -n --arg version "$2" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
-    spdxVersion: "SPDX-2.3", dataLicense: "CC0-1.0", SPDXID: "SPDXRef-DOCUMENT",
-    name: ("native-probe-" + $version), documentNamespace: ("https://spdx.example.test/native-probe/" + $version),
-    creationInfo: {created: $created, creators: ["Tool: package-init-chain-test"]},
-    packages: [{SPDXID: "SPDXRef-Package", name: "native-probe", versionInfo: $version,
-                downloadLocation: "NOASSERTION", filesAnalyzed: false}],
-    relationships: [{spdxElementId: "SPDXRef-DOCUMENT", relationshipType: "DESCRIBES", relatedSpdxElement: "SPDXRef-Package"}]}' >"$1"
-}
 sbom_fixture "$workspace/sbom-1.0.0.spdx.json" 1.0.0
 COSIGN_PASSWORD='' quiet "$root/scripts/attest-layout-manifest.sh" "$workspace/source" "$workspace/approved/cosign.key" \
   "$workspace/sbom-1.0.0.spdx.json"
@@ -156,24 +137,9 @@ mkdir -m 0777 "$workspace/verify" "$workspace/verify-refused"
 mkdir -m 0777 "$workspace/attestations" "$workspace/unsigned" "$workspace/foreign-subject" "$workspace/tampered-provenance"
 # Operator trust bootstraps: the approved key under managed-key-no-tlog, the
 # same key under the default sigstore policy, and a foreign key.
-bootstrap() {
-  python3 - "$@" <<'PY'
-import base64, datetime, hashlib, json, sys
-output, policy, public_key, plugin_id = sys.argv[1:]
-pem = open(public_key, encoding="ascii").read()
-body = "".join(line for line in pem.splitlines() if not line.startswith("-----"))
-now = datetime.datetime.now(datetime.timezone.utc)
-stamp = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%SZ")
-key = {"keyId": base64.b64encode(hashlib.sha256(base64.b64decode(body)).digest()).decode(),
-       "algorithm": "ecdsa-p256-sha256", "publicKey": pem,
-       "validFrom": stamp(now - datetime.timedelta(days=1)), "validUntil": stamp(now + datetime.timedelta(days=1))}
-with open(output, "w", encoding="utf-8") as file:
-    json.dump({"schemaVersion": 1, "publishers": [{"id": "stellwerk", "policy": policy, "pluginIds": [plugin_id], "keys": [key]}]}, file)
-PY
-}
-bootstrap "$workspace/trust/publishers.json" managed-key-no-tlog "$workspace/approved/cosign.pub" "$plugin_id"
-bootstrap "$workspace/trust-sigstore/publishers.json" sigstore "$workspace/approved/cosign.pub" "$plugin_id"
-bootstrap "$workspace/trust-wrong/publishers.json" managed-key-no-tlog "$workspace/wrong/cosign.pub" "$plugin_id"
+trust_bootstrap "$workspace/trust/publishers.json" managed-key-no-tlog "$workspace/approved/cosign.pub" "$plugin_id"
+trust_bootstrap "$workspace/trust-sigstore/publishers.json" sigstore "$workspace/approved/cosign.pub" "$plugin_id"
+trust_bootstrap "$workspace/trust-wrong/publishers.json" managed-key-no-tlog "$workspace/wrong/cosign.pub" "$plugin_id"
 cp "$workspace/wrong/cosign.pub" "$workspace/trust/wrong.pub"
 cp "$workspace/transfer/oci-manifest.sigstore.json" "$workspace/signature/oci-manifest.sigstore.json"
 chmod 0444 "$workspace/trust/"* "$workspace/trust-sigstore/"* "$workspace/trust-wrong/"* "$workspace/signature/oci-manifest.sigstore.json"

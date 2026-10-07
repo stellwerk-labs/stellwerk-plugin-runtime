@@ -25,13 +25,27 @@ ui:
     issuerName: ""
     issuerKind: ClusterIssuer
 
-# Runtime serving is a separate installer phase from migration. The installer
-# must keep this false until the matching migration Job has succeeded.
-runtime:
-  enabled: true
+# Runtime replicas. One replica is replaced with Recreate. Several replicas
+# roll one at a time (maxUnavailable 0, maxSurge 1) behind a
+# PodDisruptionBudget (minAvailable 1) and prefer distinct nodes. Every
+# replica serves reads and the UI; the plugin's fenced database lease admits
+# exactly one writer. Replicas keep no local state, so persistence requires 1.
+replicaCount: 1
 
+# The migration phase runs the package's migration Job before any runtime Pod
+# runs that package: the installer applies the new package with
+# migration.enabled=true, waits for the Job to succeed, then applies the same
+# package with migration.enabled=false. The runtime Deployment stays paused
+# for the whole phase.
 migration:
   enabled: false
+  # expand-only: the migration only adds to the schema, so the previous
+  #   package keeps serving through the phase and the runtime phase rolls the
+  #   replicas over (rolling package upgrades require this).
+  # incompatible: for a package that declares a migration its previous
+  #   version cannot run against. The phase scales the runtime to zero, the
+  #   Job migrates, and the runtime phase scales it back up.
+  compatibility: expand-only
   activeDeadlineSeconds: 300
   backoffLimit: 2
   serviceAccount:
@@ -167,6 +181,7 @@ packageVolume:
 stateVolume:
   sizeLimit: 128Mi
 
+# A ReadWriteOnce claim for the plugin state of a single replica.
 persistence:
   enabled: false
   size: 1Gi
@@ -249,4 +264,5 @@ networkPolicy:
 
 nodeSelector: {}
 tolerations: []
+# Replaces the default preferred anti-affinity of several replicas.
 affinity: {}

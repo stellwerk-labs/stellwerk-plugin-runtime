@@ -210,9 +210,9 @@ and ORAS image (plus a Cosign image for `managed-key-no-tlog`), the exact plugin
 manifest hash and an explicit `trust.mode`; there is no default trust mode. No
 image, digest, trust root or key is shipped as a default.
 
-It deploys one `Recreate` workload with a dedicated ServiceAccount (token
-automount disabled), non-root security contexts, read-only root and package mounts, bounded
-resources and a default NetworkPolicy. Secret volumes are mounted `0440`,
+It deploys one workload with a dedicated ServiceAccount (token automount
+disabled), non-root security contexts, read-only root and package mounts,
+bounded resources and a default NetworkPolicy. Secret volumes are mounted `0440`,
 the state `emptyDir` is bounded by `stateVolume.sizeLimit` and service links
 are disabled. `pluginSecretFiles` mounts operator-owned Secrets into the
 plugin container only, never into the fetch init containers.
@@ -252,13 +252,49 @@ override them for other installations. The configured control plane URL must
 resolve to that same Gateway. Package fetching fails closed until the
 operator lists the registry mirror endpoints (see Package fetch).
 
+### Replicas
+
+`replicaCount` (default 1) sets the runtime replicas. One replica is replaced
+with `Recreate`. Several replicas roll one at a time (`RollingUpdate`,
+`maxUnavailable: 0`, `maxSurge: 1`), so at least the configured number stays
+available during a package upgrade. A PodDisruptionBudget (`minAvailable: 1`,
+unhealthy Pods stay evictable) keeps one replica through node drains, and a
+preferred anti-affinity on `kubernetes.io/hostname` spreads them; an explicit
+`affinity` replaces that default. Every replica serves reads and the UI. The
+chart elects no writer: the plugin's fenced database lease admits exactly one,
+and every supported plugin binary takes it (`v1alpha` supports fresh
+installations only). Replicas keep no local state, so `persistence.enabled`
+requires `replicaCount: 1`.
+
 ### Migration phase
 
-Database migration is an explicit installer phase, not a startup side effect.
-Install with `runtime.enabled=false,migration.enabled=true`, wait for the Job
-to succeed and record that result, then upgrade to
-`migration.enabled=false,runtime.enabled=true`. The chart rejects both phases
-at once. The migration profile (`mode: native-migrate`) comes from
+Database migration is an explicit installer phase, not a startup side effect,
+and runs before any runtime Pod runs the new package:
+
+1. Apply the new package with `migration.enabled=true`. The migration Job
+   runs; the runtime Deployment is paused, so it creates no Pod from the new
+   package. Wait for the Job to succeed and record that result.
+2. Apply the same package with `migration.enabled=false`. The Deployment is
+   resumed and starts or rolls to the new package.
+
+`migration.compatibility` selects what the runtime does meanwhile:
+
+- `expand-only` (default): the migration only adds to the schema, so the
+  previous package keeps working against it. Its replicas keep serving
+  through step 1, and step 2 rolls them over. While replicas roll, both
+  versions run side by side, so rolling package upgrades require expand-only
+  (backward-compatible) migrations.
+- `incompatible`: for a package that declares a migration its previous
+  version cannot run against. Step 1 scales the runtime to zero, the Job
+  migrates, and step 2 scales it back up with the new package. The plugin is
+  unavailable in between. Old Pods may still be shutting down (up to
+  `terminationGracePeriodSeconds`) while the Job starts, so the migration
+  must take the fenced writer lease before it changes the schema.
+
+On a fresh installation step 1 creates the paused Deployment without Pods.
+With `persistence.enabled` and a `WaitForFirstConsumer` storage class the
+state claim binds only once step 2 starts the first Pod, so wait for the Job
+itself rather than for every resource in step 1. The migration profile (`mode: native-migrate`) comes from
 `migration.profileSecret`, the migration principal's database URL from a
 separate `migration.databaseSecret` mounted at
 `/run/secrets/stellwerk-plugin-migration/database-url`. Neither Secret reaches
@@ -343,7 +379,8 @@ Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
 ./scripts/check.sh                  # gofmt, go test -race, go vet, Linux execution tests, chart contract, package build
 ./scripts/compose-test.sh           # run and serve-ui as non-root PID 1, filtered environment, state, CSP, exit 0 on SIGTERM
 ./scripts/package-init-chain-test.sh  # sign, attest, bundle, publish locally, run the chart init chain, negatives
-./scripts/kind-test.sh              # install, package upgrade, restart, rollback on a throwaway kind cluster
+./scripts/kind-test.sh development  # untrusted profile: install, package upgrade, restart, rollback on a throwaway kind cluster
+./scripts/kind-test.sh production   # managed-key-no-tlog from Secrets, two replicas, PDB, both migration paths, rolling upgrade
 ```
 
 `LINUX_TEST_PLATFORM=linux/amd64 ./scripts/linux-test.sh` and
@@ -365,8 +402,9 @@ ports and temporary directories, and remove what they create.
 - NetworkPolicy cannot prove that a public hostname maps to the selected
   Gateway Pods. Bind control plane URL, DNS, certificate SAN and the
   `networkPolicy.coreGateway` peer as one verified configuration.
-- `Recreate` prevents overlap within one Deployment; it is not a fenced
-  single-writer protocol.
+- The chart provides no writer election. Several replicas, a rolling
+  upgrade and the shutdown of an incompatible migration's old Pods are safe
+  only because the plugin takes its fenced database lease.
 - `trustState` in the receipt is consistency metadata, not cryptographic
   evidence on its own.
 

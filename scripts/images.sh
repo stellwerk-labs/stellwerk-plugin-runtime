@@ -32,6 +32,15 @@ require_image() {
   docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep -Fx "$image" >/dev/null
 }
 
+# quiet hides a step's progress chatter but replays it when the step fails.
+quiet() {
+  local output
+  if ! output="$("$@" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+}
+
 # offline_cosign runs the pinned Cosign image without any network. Extra
 # docker arguments (mounts) precede "--"; Cosign arguments follow it. A key
 # password is read from COSIGN_PASSWORD in the environment, never from argv.
@@ -63,4 +72,36 @@ attach_bundle() {
       --annotation "dev.sigstore.bundle.predicateType=$predicate_type" --format json \
       "$subject" "$(basename "$bundle"):$sigstore_bundle_type" | jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))'
   )
+}
+
+# sbom_fixture OUTPUT VERSION writes a minimal SPDX 2 document of the probe
+# package. It stands in for the publisher's SBOM generator, which is outside
+# this repository.
+sbom_fixture() {
+  jq -n --arg version "$2" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+    spdxVersion: "SPDX-2.3", dataLicense: "CC0-1.0", SPDXID: "SPDXRef-DOCUMENT",
+    name: ("native-probe-" + $version), documentNamespace: ("https://spdx.example.test/native-probe/" + $version),
+    creationInfo: {created: $created, creators: ["Tool: native-probe test fixture"]},
+    packages: [{SPDXID: "SPDXRef-Package", name: "native-probe", versionInfo: $version,
+                downloadLocation: "NOASSERTION", filesAnalyzed: false}],
+    relationships: [{spdxElementId: "SPDXRef-DOCUMENT", relationshipType: "DESCRIBES", relatedSpdxElement: "SPDXRef-Package"}]}' >"$1"
+}
+
+# trust_bootstrap OUTPUT POLICY PUBLIC_KEY PLUGIN_ID writes an operator trust
+# bootstrap that pins PUBLIC_KEY for PLUGIN_ID under POLICY, valid from one
+# day ago to one day ahead.
+trust_bootstrap() {
+  python3 - "$@" <<'PY'
+import base64, datetime, hashlib, json, sys
+output, policy, public_key, plugin_id = sys.argv[1:]
+pem = open(public_key, encoding="ascii").read()
+body = "".join(line for line in pem.splitlines() if not line.startswith("-----"))
+now = datetime.datetime.now(datetime.timezone.utc)
+stamp = lambda moment: moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+key = {"keyId": base64.b64encode(hashlib.sha256(base64.b64decode(body)).digest()).decode(),
+       "algorithm": "ecdsa-p256-sha256", "publicKey": pem,
+       "validFrom": stamp(now - datetime.timedelta(days=1)), "validUntil": stamp(now + datetime.timedelta(days=1))}
+with open(output, "w", encoding="utf-8") as file:
+    json.dump({"schemaVersion": 1, "publishers": [{"id": "stellwerk", "policy": policy, "pluginIds": [plugin_id], "keys": [key]}]}, file)
+PY
 }

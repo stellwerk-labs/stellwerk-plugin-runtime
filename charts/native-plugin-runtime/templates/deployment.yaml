@@ -1,4 +1,8 @@
-{{- if and .Values.enabled .Values.runtime.enabled }}
+{{- if .Values.enabled }}
+{{- $replicas := int .Values.replicaCount }}
+{{- if and (gt $replicas 1) .Values.persistence.enabled }}
+{{- fail "persistence.enabled requires replicaCount=1: replicas keep no local state; shared plugin state belongs in the plugin database behind its fenced writer lease" }}
+{{- end }}
 {{- if and .Values.ui.enabled (eq (int .Values.ui.port) (int .Values.plugin.port)) }}
 {{- fail "UI and plugin ports must be different" }}
 {{- end }}
@@ -20,9 +24,31 @@ metadata:
   labels:
     {{- include "native-plugin-runtime.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  {{- /*
+  Installer phases (README "Migration phase"):
+
+    phase      migration.enabled  paused  replicas  runtime Pods
+    migration  true               true    N or 0*   previous package keeps serving, or none
+    runtime    false              false   N         roll to (or start with) this package
+
+  * 0 with migration.compatibility=incompatible. A paused Deployment creates
+  no ReplicaSet for a changed Pod template but still scales the existing one,
+  so no Pod runs this package before its migration Job succeeded.
+  */}}
+  paused: {{ .Values.migration.enabled }}
+  replicas: {{ if and .Values.migration.enabled (eq .Values.migration.compatibility "incompatible") }}0{{ else }}{{ $replicas }}{{ end }}
   strategy:
+    {{- if gt $replicas 1 }}
+    # The previous and the new package overlap while replicas roll, which
+    # expand-only migrations make safe; the plugin's fenced database lease
+    # admits exactly one writer among them.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+    {{- else }}
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "native-plugin-runtime.runtimeSelectorLabels" . | nindent 6 }}
@@ -252,9 +278,19 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- if .Values.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if gt $replicas 1 }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "native-plugin-runtime.runtimeSelectorLabels" . | nindent 20 }}
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:

@@ -1,7 +1,4 @@
 {{- if and .Values.enabled .Values.migration.enabled }}
-{{- if .Values.runtime.enabled -}}
-{{- fail "runtime.enabled must remain false while the migration phase is enabled" -}}
-{{- end -}}
 {{- $profileSecret := required "migration.profileSecret.name is required" .Values.migration.profileSecret.name -}}
 {{- $databaseSecret := required "migration.databaseSecret.name is required" .Values.migration.databaseSecret.name -}}
 {{- if eq $profileSecret $databaseSecret -}}

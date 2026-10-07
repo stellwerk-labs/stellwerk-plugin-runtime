@@ -1,4 +1,4 @@
-{{- if and .Values.enabled .Values.runtime.enabled .Values.ui.enabled .Values.ui.gateway.enabled }}
+{{- if and .Values.enabled .Values.ui.enabled .Values.ui.gateway.enabled }}
 {{- $name := printf "%s-ui" (include "native-plugin-runtime.fullname" .) }}
 {{- $consoleHost := regexReplaceAll ":[0-9]+$" (get (urlParse .Values.ui.consoleOrigin) "host") "" }}
 {{- if eq (lower $consoleHost) (lower .Values.ui.gateway.hostname) }}

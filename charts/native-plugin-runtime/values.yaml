@@ -201,7 +201,19 @@ probes:
   liveness:
     periodSeconds: 10
 
-terminationGracePeriodSeconds: 10
+# Graceful termination. A deleted Pod leaves the Service endpoints while it
+# shuts down, but kube-proxy and the Gateways stop sending to it only once the
+# EndpointSlice update has reached them, usually within a second or two. The
+# plugin and UI containers therefore keep serving for preStopDelaySeconds (a
+# preStop sleep, Kubernetes 1.30 or newer; 0 disables it) before they receive
+# SIGTERM, so no request meets a closed listener during a rolling upgrade.
+# 5 s covers that propagation with margin and adds 5 s per replica to a rollout.
+preStopDelaySeconds: 5
+
+# Covers preStopDelaySeconds and the drain after SIGTERM: at least
+# preStopDelaySeconds + 5 (the UI drains for up to 5 s). The default leaves
+# the plugin 10 s to drain.
+terminationGracePeriodSeconds: 15
 
 # Only these explicitly supplied names reach the executable. The launcher also
 # filters its process environment to STELLWERK_PLUGIN_*, OTEL_*, SSL_CERT_FILE and

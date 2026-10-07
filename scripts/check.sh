@@ -708,6 +708,49 @@ if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" --
   exit 1
 fi
 
+# Graceful termination: the plugin and UI keep serving for the preStop delay
+# while the endpoint removal propagates, then drain within the grace period.
+# Fetch init containers and the token sidecar (which must outlive the
+# plugin's shutdown) get no delay.
+helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
+  --set preStopDelaySeconds=10 --set terminationGracePeriodSeconds=15 >"$fixture/prestop-custom.yaml"
+helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
+  --set preStopDelaySeconds=0 --kube-version 1.29.0 >"$fixture/prestop-off.yaml"
+python3 - "$fixture" <<'PY'
+import re
+import sys
+
+
+def containers(path):
+    rendered = open(f"{sys.argv[1]}/{path}", encoding="utf-8").read()
+    deployment = next(doc for doc in rendered.split("\n---") if re.search(r"^kind: Deployment$", doc, re.M))
+    grace = re.search(r"^      terminationGracePeriodSeconds: (\d+)$", deployment, re.M).group(1)
+    pod = deployment.split("      initContainers:\n", 1)[1].split("      volumes:\n", 1)[0]
+    return int(grace), dict(re.findall(r"^        - name: ([a-z-]+)\n((?:(?:          .*)?\n)*)", pod, re.M))
+
+
+def pre_stop(seconds):
+    return f"          lifecycle:\n            preStop:\n              sleep:\n                seconds: {seconds}\n"
+
+
+for path, delay in [("workload.yaml", 5), ("ui.yaml", 5), ("prestop-custom.yaml", 10), ("prestop-off.yaml", 0)]:
+    grace, blocks = containers(path)
+    assert grace == 15, (path, grace)
+    assert {"plugin", "ui"} <= set(blocks), (path, list(blocks))
+    for name, block in blocks.items():
+        delayed = delay > 0 and name in {"plugin", "ui"}
+        assert (pre_stop(delay) in block) == delayed, (path, name)
+        assert block.count("lifecycle:") == delayed, (path, name)
+assert "core-token" in containers("workload.yaml")[1]
+PY
+for invalid in "--set=preStopDelaySeconds=11" "--set=terminationGracePeriodSeconds=9" "--set=preStopDelaySeconds=-1" \
+  "--set-string=preStopDelaySeconds=5" "--kube-version=1.29.0"; do
+  if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" "$invalid" >/dev/null 2>&1; then
+    echo "chart accepted the termination setting $invalid" >&2
+    exit 1
+  fi
+done
+
 # Fetch isolation: registry credentials and ORAS stay in the fetch init
 # containers, and Pod egress reaches only the configured mirror endpoints.
 # NetworkPolicy is per Pod, so the plugin can reach those endpoints but holds

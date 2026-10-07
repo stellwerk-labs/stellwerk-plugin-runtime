@@ -269,6 +269,14 @@ and every supported plugin binary takes it (`v1alpha` supports fresh
 installations only). Replicas keep no local state, so `persistence.enabled`
 requires `replicaCount: 1`.
 
+A terminating replica keeps serving for `preStopDelaySeconds` (default 5, a
+preStop sleep on the plugin and UI containers) before it receives `SIGTERM`:
+the Pod leaves the Service endpoints at once, but kube-proxy and the Gateways
+learn that only when the EndpointSlice update reaches them, and a listener
+closed earlier would fail the requests still routed to it. Kubernetes 1.30 or
+newer; `0` disables the delay. `terminationGracePeriodSeconds` (default 15)
+must be at least the delay plus 5 s, so the containers still drain after it.
+
 ### Migration phase
 
 Database migration is an explicit installer phase, not a startup side effect,

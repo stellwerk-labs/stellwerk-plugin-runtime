@@ -349,7 +349,10 @@ plugin container  STELLWERK_CORE_TOKEN_FILE, read per request, read-only mount
   Kubernetes minimum and the contract maximum). The plugin container gets the
   memory-backed token directory read-only and never sees the Kubernetes token.
 - Every exchange re-reads the projected token, which kubelet rotates. The token
-  is refreshed at two thirds of `expires_in`. HTTP 503 and other temporary
+  is refreshed at two thirds of `expires_in`. Refresh point and expiry are
+  wall-clock instants; the sidecar wakes at least every 5 s and decides from
+  the wall clock, so after a host suspend or clock jump it refreshes at once
+  (removing an expired token first). HTTP 503 and other temporary
   failures are retried with jittered exponential backoff from 1 s up to 30 s;
   a token that expires meanwhile is removed. HTTP 400 `invalid_grant` and other
   refusals remove the token and stop the sidecar with a clear error, so the

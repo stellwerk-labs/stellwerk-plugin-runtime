@@ -46,6 +46,10 @@ const (
 	initialExchangeRetry   = time.Second
 	maximumExchangeRetry   = 30 * time.Second
 	exchangeRequestTimeout = 10 * time.Second
+	// wallClockRecheck bounds every refresher sleep. It matches the sidecar's
+	// readiness probe period, so after a host suspend the refresher replaces
+	// an expired token before three failed probes (15 s) mark the Pod unready.
+	wallClockRecheck = 5 * time.Second
 )
 
 var (
@@ -207,7 +211,9 @@ func validIssuedToken(token string) bool {
 	return len(token) <= maxIssuedTokenBytes && issuedTokenPattern.MatchString(token)
 }
 
-// clock lets tests drive refresh timing without sleeping.
+// clock lets tests drive refresh timing without sleeping. Now reads the wall
+// clock; After is a timer on the monotonic clock, which stops while the host
+// is suspended.
 type clock interface {
 	Now() time.Time
 	After(time.Duration) <-chan time.Time
@@ -215,7 +221,10 @@ type clock interface {
 
 type systemClock struct{}
 
-func (systemClock) Now() time.Time                         { return time.Now() }
+// Now drops the monotonic reading. Otherwise Before and Sub between two
+// readings would ignore a wall-clock jump after a suspend, while IAM and
+// check-core-token judge the token by the wall clock.
+func (systemClock) Now() time.Time                         { return time.Now().Round(0) }
 func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // equalJitter waits between half and all of d, so restarted replicas spread out.
@@ -228,6 +237,7 @@ type coreTokenRefresher struct {
 	tokenFile string
 	clock     clock
 	jitter    func(time.Duration) time.Duration
+	recheck   time.Duration // the longest single sleep
 	logger    *log.Logger
 }
 
@@ -236,6 +246,13 @@ type coreTokenRefresher struct {
 // exponential backoff. The file exists only while its token is valid: it is
 // removed when the token expires during retries and when IAM refuses the
 // workload, which also ends run with that refusal.
+//
+// The refresh point and the expiry are wall-clock instants, but Go timers run
+// on the monotonic clock, which stops while the host is suspended: one long
+// timer would fire minutes after the token had expired. The refresher
+// therefore sleeps at most recheck at a time and decides afresh from the wall
+// clock on every wake-up: past the refresh point it exchanges at once, past
+// the expiry it first removes the token.
 func (r *coreTokenRefresher) run(ctx context.Context) error {
 	expiry, err := r.recoverExpiry()
 	if err != nil {
@@ -249,9 +266,10 @@ func (r *coreTokenRefresher) run(ctx context.Context) error {
 		}
 		var refusal refusalError
 		var wait time.Duration
+		now := r.clock.Now()
 		switch {
 		case err == nil:
-			expiry = r.clock.Now().Add(issued.lifetime)
+			expiry = now.Add(issued.lifetime)
 			if err := writeCoreToken(r.tokenFile, issued.value, expiry); err != nil {
 				return fmt.Errorf("write Core token: %w", err)
 			}
@@ -266,15 +284,15 @@ func (r *coreTokenRefresher) run(ctx context.Context) error {
 			wait, retry = r.jitter(retry), min(retry*2, maximumExchangeRetry)
 			r.logger.Printf("Core token exchange failed, retrying in %s: %v", wait, err)
 		}
-		if expiry, err = r.wait(ctx, wait, expiry); err != nil || ctx.Err() != nil {
+		if expiry, err = r.sleepUntil(ctx, now.Add(wait), expiry); err != nil || ctx.Err() != nil {
 			return err
 		}
 	}
 }
 
-// wait sleeps for d and removes the token file when its expiry passes first.
-func (r *coreTokenRefresher) wait(ctx context.Context, d time.Duration, expiry time.Time) (time.Time, error) {
-	deadline := r.clock.Now().Add(d)
+// sleepUntil returns once the wall clock reaches deadline and removes the
+// token file when the wall clock reaches its expiry first.
+func (r *coreTokenRefresher) sleepUntil(ctx context.Context, deadline, expiry time.Time) (time.Time, error) {
 	for {
 		now := r.clock.Now()
 		if !expiry.IsZero() && !now.Before(expiry) {
@@ -287,9 +305,9 @@ func (r *coreTokenRefresher) wait(ctx context.Context, d time.Duration, expiry t
 		if !now.Before(deadline) {
 			return expiry, nil
 		}
-		step := deadline.Sub(now)
-		if !expiry.IsZero() && expiry.Sub(now) < step {
-			step = expiry.Sub(now)
+		step := min(deadline.Sub(now), r.recheck)
+		if !expiry.IsZero() {
+			step = min(step, expiry.Sub(now))
 		}
 		select {
 		case <-ctx.Done():
@@ -380,7 +398,7 @@ func refreshCoreToken(args []string) error {
 	defer stop()
 	refresher := coreTokenRefresher{
 		exchange: exchange.exchange, tokenFile: *tokenFile, clock: systemClock{},
-		jitter: equalJitter, logger: log.New(os.Stderr, "refresh-core-token: ", log.LstdFlags|log.LUTC),
+		jitter: equalJitter, recheck: wallClockRecheck, logger: log.New(os.Stderr, "refresh-core-token: ", log.LstdFlags|log.LUTC),
 	}
 	return refresher.run(ctx)
 }

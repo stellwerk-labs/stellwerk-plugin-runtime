@@ -154,16 +154,19 @@ func (p *projectedToken) rotate(t *testing.T, content string) {
 	}
 }
 
-// fakeClock lets a test decide when each refresher wait ends.
+// fakeClock lets a test decide when each refresher wait ends. now is the wall
+// clock; timers run on elapsed, the monotonic clock. advance moves both, jump
+// moves the wall clock alone, as after a host suspend.
 type fakeClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers []fakeTimer
-	waits  chan time.Duration
+	mu      sync.Mutex
+	now     time.Time
+	elapsed time.Duration
+	timers  []fakeTimer
+	waits   chan time.Duration
 }
 
 type fakeTimer struct {
-	at   time.Time
+	at   time.Duration
 	fire chan time.Time
 }
 
@@ -182,7 +185,7 @@ func (c *fakeClock) Now() time.Time {
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
 	fire := make(chan time.Time, 1)
-	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), fire: fire})
+	c.timers = append(c.timers, fakeTimer{at: c.elapsed + d, fire: fire})
 	c.mu.Unlock()
 	c.waits <- d
 	return fire
@@ -192,15 +195,22 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
+	c.elapsed += d
 	pending := c.timers[:0]
 	for _, timer := range c.timers {
-		if timer.at.After(c.now) {
+		if timer.at > c.elapsed {
 			pending = append(pending, timer)
 		} else {
 			timer.fire <- c.now
 		}
 	}
 	c.timers = pending
+}
+
+func (c *fakeClock) jump(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
 }
 
 // nextWait returns the duration of the refresher's next sleep.
@@ -244,7 +254,14 @@ type refresherRun struct {
 
 // startRefresher runs the real refresher against the fixture over TLS. Jitter
 // is the identity so backoff steps are exact; equalJitter is tested apart.
+// Sleeps are capped only beyond the longest token lifetime, so each wait is
+// whole; the suspend test runs with the production cap.
 func startRefresher(t *testing.T, fixture *iamExchangeFixture, prepare func(tokenFile string, now time.Time)) *refresherRun {
+	t.Helper()
+	return startCappedRefresher(t, fixture, prepare, maxIssuedLifetime)
+}
+
+func startCappedRefresher(t *testing.T, fixture *iamExchangeFixture, prepare func(tokenFile string, now time.Time), recheck time.Duration) *refresherRun {
 	t.Helper()
 	run := &refresherRun{
 		fixture: fixture, projected: newProjectedToken(t, "projected-sa-token-1"), clock: newFakeClock(),
@@ -259,7 +276,7 @@ func startRefresher(t *testing.T, fixture *iamExchangeFixture, prepare func(toke
 	}
 	refresher := coreTokenRefresher{
 		exchange: exchange.exchange, tokenFile: run.tokenFile, clock: run.clock,
-		jitter: func(d time.Duration) time.Duration { return d }, logger: log.New(run.logs, "", 0),
+		jitter: func(d time.Duration) time.Duration { return d }, recheck: recheck, logger: log.New(run.logs, "", 0),
 	}
 	ctx, stop := context.WithCancel(t.Context())
 	run.stop = stop
@@ -457,6 +474,91 @@ func TestCoreTokenReadinessTransitions(t *testing.T) {
 	}
 	if err := execute([]string{"check-core-token", "--token-file=" + run.tokenFile}); err != nil {
 		t.Fatalf("check-core-token after recovery: %v", err)
+	}
+}
+
+// A suspended host stops the monotonic timers while the wall clock, by which
+// IAM and readiness judge the token, runs on. The refresher must notice on its
+// next wake-up, at most wallClockRecheck later: refresh at once past the
+// refresh point, and past the expiry remove the token, then retry with the
+// usual backoff until an exchange succeeds.
+func TestCoreTokenRefreshFollowsTheWallClockAcrossAHostSuspend(t *testing.T) {
+	fixture := newIAMExchangeFixture(t)
+	fixture.configure(http.StatusOK, http.StatusOK, http.StatusOK, http.StatusServiceUnavailable)
+	run := startCappedRefresher(t, fixture, nil, wallClockRecheck)
+	ready := func() error { return coreTokenReady(run.tokenFile, run.clock.Now()) }
+	issuedBy := func(want int) []string {
+		t.Helper()
+		_, issued := fixture.seen()
+		if len(issued) != want || run.token(t) != issued[want-1] {
+			t.Fatalf("%d tokens issued, want %d, the latest in the token file", len(issued), want)
+		}
+		return issued
+	}
+	expiresIn := func(want time.Duration) {
+		t.Helper()
+		if expiry, err := readCoreTokenExpiry(run.tokenFile); err != nil || !expiry.Equal(run.clock.Now().Add(want)) {
+			t.Fatalf("expiry %v, want now + %s (%v)", expiry, want, err)
+		}
+	}
+	if wait := run.clock.nextWait(t); wait != wallClockRecheck {
+		t.Fatalf("the refresher sleeps %s at once, want at most %s", wait, wallClockRecheck)
+	}
+	issuedBy(1)
+
+	// Suspended past the refresh point (600 s), 100 s before the expiry.
+	run.clock.jump(800 * time.Second)
+	if err := ready(); err != nil {
+		t.Fatalf("unready although the token is still valid: %v", err)
+	}
+	run.clock.advance(wallClockRecheck)
+	if wait := run.clock.nextWait(t); wait != wallClockRecheck {
+		t.Fatalf("after the refresh the refresher sleeps %s", wait)
+	}
+	issuedBy(2)
+	expiresIn(900 * time.Second)
+	if err := ready(); err != nil {
+		t.Fatalf("unready after the refresh: %v", err)
+	}
+
+	// Suspended past the expiry: unready at once, the first wake-up removes
+	// the token and exchanges, IAM is still unavailable, the retry succeeds.
+	run.clock.jump(time.Hour)
+	if ready() == nil {
+		t.Fatal("ready with an expired token")
+	}
+	run.clock.advance(wallClockRecheck)
+	if wait := run.clock.nextWait(t); wait != initialExchangeRetry {
+		t.Fatalf("after a failed exchange the refresher sleeps %s, want %s", wait, initialExchangeRetry)
+	}
+	if _, err := os.Stat(run.tokenFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the expired token is still present: %v", err)
+	}
+	if subjects, issued := fixture.seen(); len(subjects) != 3 || len(issued) != 2 {
+		t.Fatalf("%d exchanges, %d issued after the wake-up, want 3 and 2", len(subjects), len(issued))
+	}
+	if ready() == nil {
+		t.Fatal("ready without a token")
+	}
+	run.clock.advance(initialExchangeRetry)
+	if wait := run.clock.nextWait(t); wait != wallClockRecheck {
+		t.Fatalf("after recovery the refresher sleeps %s", wait)
+	}
+	issuedBy(3)
+	expiresIn(900 * time.Second)
+	if err := ready(); err != nil {
+		t.Fatalf("unready after recovery: %v", err)
+	}
+	if !strings.Contains(run.logs.String(), "Core token expired") {
+		t.Fatal("the expiry is not logged")
+	}
+}
+
+// Before and Sub between two readings with monotonic parts would ignore a
+// wall-clock jump.
+func TestSystemClockReadsTheWallClockOnly(t *testing.T) {
+	if now := (systemClock{}).Now(); strings.Contains(now.String(), " m=") {
+		t.Fatalf("systemClock.Now carries a monotonic reading: %s", now)
 	}
 }
 

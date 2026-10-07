@@ -549,6 +549,21 @@ oras manifest fetch --oci-layout "$package_output/oci-layout:1.0.0" | jq -e '
   ] | sort)
 ' >/dev/null
 
+# The runtime image the offline bundle carries is built without Docker. It
+# must stay the image Dockerfile.runtime describes, for exactly linux/amd64
+# and linux/arm64, and rebuilding the same commit gives the same digest.
+runtime_digest="$("$root/scripts/build-runtime-image.sh" "$fixture/runtime-image")"
+test "$("$root/scripts/build-runtime-image.sh" "$fixture/runtime-image-again")" = "$runtime_digest"
+oras manifest fetch --oci-layout "$fixture/runtime-image@$runtime_digest" |
+  jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] | sort == ["linux/amd64", "linux/arm64"]' >/dev/null
+grep -qx 'USER 65532:65532' Dockerfile.runtime
+grep -qx 'ENTRYPOINT \["/runtime"\]' Dockerfile.runtime
+for architecture in amd64 arm64; do
+  oras manifest fetch-config --oci-layout "$fixture/runtime-image:runtime-$architecture" | jq -e --arg architecture "$architecture" '
+    .os == "linux" and .architecture == $architecture and .config == {User: "65532:65532", Entrypoint: ["/runtime"]} and
+    (.rootfs.diff_ids | length == 1)' >/dev/null
+done
+
 ui_args=(
   --set enabled=true --set ui.enabled=true
   --set-string trust.mode=development-untrusted

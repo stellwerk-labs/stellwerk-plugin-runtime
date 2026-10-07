@@ -374,6 +374,13 @@ done
 docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.runtime dist
 ```
 
+`scripts/build-runtime-image.sh OUTPUT_LAYOUT` builds the same image for both
+platforms as one OCI index into an OCI image layout without Docker. Layers
+are deterministic and the creation time is the commit time, so a commit and
+Go toolchain always give the same digest; `oras cp` publishes it, and the
+offline bundle takes it from the layout. `check.sh` keeps it in line with
+`Dockerfile.runtime`.
+
 ## Checks
 
 Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and

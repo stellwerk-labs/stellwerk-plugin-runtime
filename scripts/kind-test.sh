@@ -135,7 +135,7 @@ esac
 push_test_images() {
   mkdir -p "$workspace/runtime-context"
   CGO_ENABLED=0 GOOS=linux GOARCH="$go_arch" GOWORK=off \
-    go build -trimpath -o "$workspace/runtime-context/runtime-linux-$go_arch" "$root/runtime"
+    go -C "$root" build -trimpath -o "$workspace/runtime-context/runtime-linux-$go_arch" ./runtime
   cp "$root/Dockerfile.runtime" "$workspace/runtime-context/Dockerfile.runtime"
   quiet docker build --network=none --build-arg "TARGETARCH=$go_arch" \
     --file "$workspace/runtime-context/Dockerfile.runtime" --tag "$runtime_tag" "$workspace/runtime-context"
@@ -546,7 +546,7 @@ airgap_scenario() {
   docker network connect "$airgap_network" "$registry"
   mkdir "$workspace/verifier" "$out"
   CGO_ENABLED=0 GOOS=linux GOARCH="$go_arch" GOWORK=off \
-    go build -trimpath -o "$workspace/verifier/runtime" "$root/runtime"
+    go -C "$root" build -trimpath -o "$workspace/verifier/runtime" ./runtime
   local output
   output="$(airgap_import "$airgap_network" "$registry:5000/mirror" "$bundle" "$workspace/verifier/runtime" "$out" "$pin" probe 2>&1)" ||
     { printf '%s\n' "$output" >&2; exit 1; }

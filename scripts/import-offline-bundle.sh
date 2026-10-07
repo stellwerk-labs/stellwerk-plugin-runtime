@@ -61,7 +61,7 @@ if [ -z "$verifier" ]; then
   command -v go >/dev/null || { echo "go is required, or pass --verifier with a trusted runtime binary" >&2; exit 1; }
   workspace="$(mktemp -d "${TMPDIR:-/tmp}/import-offline-bundle.XXXXXX")"
   root="$(cd "$(dirname "$0")/.." && pwd)"
-  (cd "$root" && CGO_ENABLED=0 GOWORK=off go build -trimpath -o "$workspace/runtime" ./runtime)
+  CGO_ENABLED=0 GOWORK=off go -C "$root" build -trimpath -o "$workspace/runtime" ./runtime
   verifier="$workspace/runtime"
 fi
 

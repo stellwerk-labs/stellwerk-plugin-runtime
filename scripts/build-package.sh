@@ -10,10 +10,11 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 commit="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null)" ||
   { echo "the source provenance needs a git checkout" >&2; exit 1; }
 
-case "$output" in
-  "$root"|/|"") echo "refusing unsafe output directory" >&2; exit 1 ;;
-esac
 mkdir -p "$output"
+output="$(cd "$output" && pwd)"
+case "$output" in
+  "$root" | /) echo "refusing unsafe output directory" >&2; exit 1 ;;
+esac
 fixture="$output/files"
 layout="$output/oci-layout"
 manifest_hash="$("$root/scripts/build-fixture.sh" "$version" "$fixture")"

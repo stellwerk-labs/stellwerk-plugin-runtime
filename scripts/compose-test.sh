@@ -60,7 +60,7 @@ chmod 0777 "$workspace/package"
 chmod a-x "$workspace/package/bin/linux/"*/plugin
 
 CGO_ENABLED=0 GOOS=linux GOARCH="$go_arch" GOWORK=off \
-  go build -trimpath -o "$workspace/context/runtime-linux-$go_arch" "$root/runtime"
+  go -C "$root" build -trimpath -o "$workspace/context/runtime-linux-$go_arch" ./runtime
 cp "$root/Dockerfile.runtime" "$workspace/context/Dockerfile.runtime"
 docker build --network=none --build-arg "TARGETARCH=$go_arch" \
   --file "$workspace/context/Dockerfile.runtime" --tag "$image" "$workspace/context" >/dev/null

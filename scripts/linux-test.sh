@@ -23,7 +23,7 @@ cleanup() {
 trap cleanup EXIT
 
 CGO_ENABLED=0 GOOS=linux GOARCH="${platform#linux/}" GOWORK=off \
-  go test -c -trimpath -o "$workspace/runtime.test" "$root/runtime"
+  go -C "$root" test -c -trimpath -o "$workspace/runtime.test" ./runtime
 printf 'FROM scratch\nCOPY runtime.test /runtime.test\nENTRYPOINT ["/runtime.test"]\n' >"$workspace/Dockerfile"
 timeout -k 5s 120s docker build --quiet --network=none --platform "$platform" --tag "$image" "$workspace" >/dev/null
 # Under cross-architecture emulation (Rosetta or QEMU) a Go 1.25+ binary

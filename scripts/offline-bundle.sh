@@ -44,9 +44,6 @@ done
 for command in docker oras helm jq go shasum; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
-case "$output" in
-  "$root" | / | *:* | *@*) echo "refusing unsafe output directory (no ':' or '@')" >&2; exit 1 ;;
-esac
 if [ -e "$output" ]; then
   echo "$output already exists" >&2
   exit 1
@@ -64,6 +61,10 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$output"
+output="$(cd "$output" && pwd)"
+case "$output" in
+  *:* | *@*) echo "refusing an output directory with ':' or '@' (ORAS reads them as a reference)" >&2; exit 1 ;;
+esac
 layout="$output/oci"
 
 # The package with its referrers, the runtime image as built.
@@ -131,16 +132,15 @@ jq -n --slurpfile release "$release" \
 # bundle.json is signed like the package: the publisher's managed key, no
 # transparency log.
 require_image "$cosign_image" "$(docker_platform)"
-bundle_dir="$(cd "$output" && pwd)"
 offline_cosign \
   --mount "type=bind,src=$(cd "$(dirname "$key")" && pwd),dst=/key,readonly" \
-  --mount "type=bind,src=$bundle_dir,dst=/bundle" \
+  --mount "type=bind,src=$output,dst=/bundle" \
   --mount "type=bind,src=$root/scripts/signing-config-no-tlog.json,dst=/config/signing-config.json,readonly" \
   -- sign-blob --yes --signing-config=/config/signing-config.json --key "/key/$(basename "$key")" \
   --bundle /bundle/bundle.sigstore.json /bundle/bundle.json >/dev/null
 
 # Verify the result exactly as the customer's import will.
-GOWORK=off go build -trimpath -o "$workspace/runtime" "$root/runtime"
+GOWORK=off go -C "$root" build -trimpath -o "$workspace/runtime" ./runtime
 "$workspace/runtime" verify-bundle --bundle "$output" \
   --trust-bootstrap-digest "$(jq -r .trustBootstrap "$output/bundle.json")" >/dev/null
 complete=true

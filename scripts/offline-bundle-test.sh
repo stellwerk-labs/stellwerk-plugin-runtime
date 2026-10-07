@@ -39,23 +39,25 @@ plugin_id=dev.stellwerk.native-probe
 tag="$plugin_id-1.0.0"
 
 # Publisher side: disposable keys, the signed and attested package, the
-# runtime image, the trust bootstrap and the bundle.
+# runtime image, the trust bootstrap and the bundle. The scripts run outside
+# the checkout with paths relative to their working directory.
+cd "$workspace"
 for key in approved foreign; do
   mkdir -m 0700 "$workspace/$key"
   COSIGN_PASSWORD='' quiet offline_cosign --mount "type=bind,src=$workspace/$key,dst=/keys" --workdir /keys \
     -- generate-key-pair
 done
-"$root/scripts/build-package.sh" 1.0.0 "$workspace/package" >/dev/null
+"$root/scripts/build-package.sh" 1.0.0 package >/dev/null
 COSIGN_PASSWORD='' quiet "$root/scripts/sign-layout-manifest.sh" "$workspace/package" "$workspace/approved/cosign.key"
 sbom_fixture "$workspace/sbom.spdx.json" 1.0.0
 COSIGN_PASSWORD='' quiet "$root/scripts/attest-layout-manifest.sh" "$workspace/package" "$workspace/approved/cosign.key" \
   "$workspace/sbom.spdx.json"
-runtime_digest="$("$root/scripts/build-runtime-image.sh" "$workspace/runtime")"
+runtime_digest="$("$root/scripts/build-runtime-image.sh" runtime)"
 trust_bootstrap "$workspace/publishers.json" managed-key-no-tlog "$workspace/approved/cosign.pub" "$plugin_id"
 bundle="$workspace/bundle"
-COSIGN_PASSWORD='' quiet "$root/scripts/offline-bundle.sh" --package "$workspace/package" \
-  --runtime-image "$workspace/runtime@$runtime_digest" --key "$workspace/approved/cosign.key" \
-  --trust-bootstrap "$workspace/publishers.json" --minimum-core-version 1.0.0 "$bundle"
+COSIGN_PASSWORD='' quiet "$root/scripts/offline-bundle.sh" --package package \
+  --runtime-image "runtime@$runtime_digest" --key approved/cosign.key \
+  --trust-bootstrap publishers.json --minimum-core-version 1.0.0 bundle
 pin="sha256:$(shasum -a 256 "$bundle/publishers.json" | awk '{print $1}')"
 # Variants hard-link the bundle's blobs; read-only files make an accidental
 # in-place edit fail instead of corrupting the original.
@@ -94,7 +96,7 @@ for _ in {1..50}; do
 done
 mkdir "$workspace/verifier"
 CGO_ENABLED=0 GOOS=linux GOARCH="${platform#linux/}" GOWORK=off \
-  go build -trimpath -o "$workspace/verifier/runtime" "$root/runtime"
+  go -C "$root" build -trimpath -o "$workspace/verifier/runtime" ./runtime
 
 # import_bundle BUNDLE PREFIX PIN [probe] imports BUNDLE into the registry
 # under PREFIX from the internal network (airgap_import).
@@ -145,9 +147,9 @@ jq -e --slurpfile bundle "$bundle/bundle.json" --arg prefix "$registry:5000/mirr
 cmp -s "$workspace/out-mirror/publishers.json" "$bundle/publishers.json"
 cmp -s "$workspace/out-mirror/oci-manifest.sigstore.json" "$workspace/package/oci-manifest.sigstore.json"
 # Importing the same bundle again, now from the host with the verifier built
-# from this checkout, changes nothing.
-"$root/scripts/import-offline-bundle.sh" "$bundle" "$host/mirror" --trust-bootstrap-digest "$pin" --plain-http \
-  --out "$workspace/out-host" >/dev/null
+# from this checkout and relative paths, changes nothing.
+"$root/scripts/import-offline-bundle.sh" bundle "$host/mirror" --trust-bootstrap-digest "$pin" --plain-http \
+  --out out-host >/dev/null
 test "$(catalog | grep -c '^mirror/')" = 5
 echo "import: no egress but the registry; manifests, tags, platform manifests, referrers and chart preserved; idempotent"
 

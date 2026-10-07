@@ -14,8 +14,10 @@ output="${1:?usage: build-runtime-image.sh OUTPUT_LAYOUT}"
 for command in go oras jq python3 git; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
+mkdir -p "$output"
+output="$(cd "$output" && pwd)"
 case "$output" in
-  "$root" | / | "") echo "refusing unsafe output directory" >&2; exit 1 ;;
+  "$root" | /) echo "refusing unsafe output directory" >&2; exit 1 ;;
 esac
 created="$(TZ=UTC git -C "$root" log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)"
 workspace="$(mktemp -d "${TMPDIR:-/tmp}/runtime-image.XXXXXX")"
@@ -24,7 +26,7 @@ trap 'rm -rf -- "$workspace"' EXIT
 for architecture in amd64 arm64; do
   mkdir "$workspace/$architecture"
   CGO_ENABLED=0 GOOS=linux GOARCH="$architecture" GOWORK=off \
-    go build -trimpath -o "$workspace/$architecture/runtime" "$root/runtime"
+    go -C "$root" build -trimpath -o "$workspace/$architecture/runtime" ./runtime
   # One gzip layer holding /runtime (root-owned, 0755, epoch mtime).
   diff_id="$(python3 - "$workspace/$architecture" <<'PY'
 import gzip, hashlib, io, sys, tarfile

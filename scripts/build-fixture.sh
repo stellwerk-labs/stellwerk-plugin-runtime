@@ -12,10 +12,11 @@ if [[ ! "$version" =~ $semver_pattern ]]; then
 fi
 
 mkdir -p "$output/bin/linux/amd64" "$output/bin/linux/arm64"
+output="$(cd "$output" && pwd)"
 for architecture in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH="$architecture" GOWORK=off \
-    go build -trimpath -ldflags "-s -w -X main.version=$version" \
-    -o "$output/bin/linux/$architecture/plugin" "$root/probe"
+    go -C "$root" build -trimpath -ldflags "-s -w -X main.version=$version" \
+    -o "$output/bin/linux/$architecture/plugin" ./probe
 done
 
 python3 - "$version" "$output" <<'PY'

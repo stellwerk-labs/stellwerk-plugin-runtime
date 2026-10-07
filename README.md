@@ -469,6 +469,7 @@ Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
 ./scripts/offline-bundle-test.sh    # build a bundle, import it without egress, digests and referrers kept, tampered bundles refused
 ./scripts/kind-test.sh development  # untrusted profile: install, package upgrade, restart, rollback on a throwaway kind cluster
 ./scripts/kind-test.sh production   # managed-key-no-tlog from Secrets, two replicas, PDB, both migration paths, rolling upgrade
+./scripts/kind-test.sh airgap       # import a bundle into a fresh registry, install from it alone, node without other egress
 ```
 
 `LINUX_TEST_PLATFORM=linux/amd64 ./scripts/linux-test.sh` and

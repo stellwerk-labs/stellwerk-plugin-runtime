@@ -124,3 +124,6 @@ jobs:
 
       - name: Signed packages, two replicas and migration phases on kind (production trust)
         run: ./scripts/kind-test.sh production
+
+      - name: Install from an imported offline bundle on kind without other registries (airgap)
+        run: ./scripts/kind-test.sh airgap

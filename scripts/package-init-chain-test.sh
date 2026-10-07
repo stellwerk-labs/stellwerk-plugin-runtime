@@ -130,6 +130,33 @@ if [[ "$output" != *"the provenance attestation does not verify"* ]]; then
   echo "offline verification refused the forged provenance for the wrong reason: $output" >&2
   exit 1
 fi
+# A signature referrer that is not the verified detached bundle (the same
+# manifest signed with another key), consistently re-digested into the layout
+# and release metadata.
+mkdir -p "$workspace/forged/resigned"
+COSIGN_PASSWORD='' quiet offline_cosign \
+  --mount "type=bind,src=$workspace/wrong,dst=/key,readonly" \
+  --mount "type=bind,src=$workspace/transfer,dst=/package,readonly" \
+  --mount "type=bind,src=$workspace/forged/resigned,dst=/out" \
+  --mount "type=bind,src=$root/scripts/signing-config-no-tlog.json,dst=/config/signing-config.json,readonly" \
+  -- sign-blob --yes --signing-config=/config/signing-config.json --key /key/cosign.key \
+  --bundle /out/oci-manifest.sigstore.json /package/oci-manifest.json
+cp -R "$workspace/transfer" "$workspace/transfer-resigned"
+chmod -R u+w "$workspace/transfer-resigned"
+resigned_referrer="$(attach_bundle "$workspace/transfer-resigned/oci-layout@$digest" \
+  "$workspace/forged/resigned/oci-manifest.sigstore.json" "$signature_predicate_type" --oci-layout)"
+jq --arg digest "$resigned_referrer" '.signature.digest = $digest' "$release" >"$workspace/transfer-resigned/release.json"
+jq --arg digest "$(jq -er .signature.digest "$release")" '.manifests |= map(select(.digest != $digest))' \
+  "$workspace/transfer-resigned/oci-layout/index.json" >"$workspace/forged/index.json"
+mv -- "$workspace/forged/index.json" "$workspace/transfer-resigned/oci-layout/index.json"
+if output="$("$root/scripts/verify-layout-manifest.sh" "$workspace/transfer-resigned" "$workspace/approved/cosign.pub" 2>&1)"; then
+  echo "offline verification accepted a signature referrer other than the verified bundle" >&2
+  exit 1
+fi
+if [[ "$output" != *"the signature referrer does not hold the verified signature bundle"* ]]; then
+  echo "offline verification refused the forged signature referrer for the wrong reason: $output" >&2
+  exit 1
+fi
 
 mkdir -m 0777 "$workspace/package" "$workspace/tampered" "$workspace/wrong-key"
 mkdir -m 0755 "$workspace/trust" "$workspace/trust-sigstore" "$workspace/trust-wrong" "$workspace/signature"
@@ -192,9 +219,9 @@ host_reference="$registry_address/native-probe:$plugin_version"
 timeout -k 5s 60s oras cp -r --from-oci-layout --to-plain-http \
   "$workspace/transfer/oci-layout:$plugin_version" "$host_reference" >/dev/null
 test "$(timeout -k 5s 30s oras resolve --plain-http "$host_reference")" = "$digest"
-# The recorded attestation referrers travelled with the package.
+# The recorded signature and attestation referrers travelled with the package.
 test "$(timeout -k 5s 30s oras discover --plain-http --format json "$host_reference" | jq -c '[.referrers[].digest] | sort')" = \
-  "$(jq -c '[.attestations[].digest] | sort' "$release")"
+  "$(jq -c '[.attestations[].digest, .signature.digest] | sort' "$release")"
 timeout -k 5s 60s oras cp -r --from-oci-layout --to-plain-http \
   "$workspace/other/oci-layout:1.0.1" "$registry_address/native-probe:1.0.1" >/dev/null
 # Whoever can push to the repository can attach referrers; these two forged
@@ -374,4 +401,4 @@ for case_name in tampered wrong-key; do
   fi
 done
 
-echo "Signed package init chain passed: $digest ($platform); managed-key-no-tlog release set (signature, SBOM, provenance) verified offline by the gate and Cosign, verified package ran; default-policy publisher, foreign key, missing/unsigned/foreign-subject SBOM, tampered provenance (registry and offline), tampered manifest/blob, archive layer and wrong key fail closed."
+echo "Signed package init chain passed: $digest ($platform); managed-key-no-tlog release set (signature, SBOM, provenance) verified offline by the gate and Cosign, verified package ran; default-policy publisher, foreign key, missing/unsigned/foreign-subject SBOM, tampered provenance (registry and offline), forged signature referrer, tampered manifest/blob, archive layer and wrong key fail closed."

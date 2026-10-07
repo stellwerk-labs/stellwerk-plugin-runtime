@@ -40,20 +40,24 @@ manifest_size="$(wc -c < "$manifest" | tr -d ' ')"
 layout="$package_output/oci-layout"
 jq -e '.imageLayoutVersion == "1.0.0"' "$layout/oci-layout" >/dev/null
 if ! jq -e --arg sbom "$sbom_predicate_type" --arg provenance "$provenance_predicate_type" '
-  (.attestations // {}) | type == "object" and all(to_entries[];
+  def digest: type == "string" and test("^sha256:[0-9a-f]{64}$");
+  ((.attestations // {}) | type == "object" and all(to_entries[];
     ((.key == "sbom" and .value.predicateType == $sbom) or (.key == "provenance" and .value.predicateType == $provenance)) and
-    (.value.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))' "$package_output/release.json" >/dev/null; then
-  echo "release metadata records malformed attestations" >&2
+    (.value.digest | digest))) and
+  (.signature == null or (.signature | type == "object" and keys == ["digest"] and (.digest | digest)))' \
+  "$package_output/release.json" >/dev/null; then
+  echo "release metadata records a malformed signature or attestations" >&2
   exit 1
 fi
 # The index selects the signed manifest once and otherwise only the
-# attestation referrers release.json records.
+# signature and attestation referrers release.json records.
 if ! jq -e --arg digest "sha256:$manifest_sha" --argjson size "$manifest_size" \
   --slurpfile release "$package_output/release.json" '
   .schemaVersion == 2 and ([.manifests[] | select(.digest == $digest and .size == $size)] | length == 1) and
-  ([.manifests[].digest | select(. != $digest)] | sort) == ([($release[0].attestations // {})[].digest] | sort)' \
+  ([.manifests[].digest | select(. != $digest)] | sort) ==
+    ([($release[0].attestations // {})[].digest, ($release[0].signature.digest // empty)] | sort)' \
   "$layout/index.json" >/dev/null; then
-  echo "OCI index does not select exactly the signed manifest and its recorded attestations" >&2
+  echo "OCI index does not select exactly the signed manifest and its recorded referrers" >&2
   exit 1
 fi
 
@@ -93,6 +97,37 @@ if ! jq -e --slurpfile release "$package_output/release.json" --arg hash "${plug
   exit 1
 fi
 
+# referrer_bundle NAME DIGEST PREDICATE_TYPE checks that the recorded
+# referrer is a Sigstore bundle referrer of exactly this manifest and prints
+# the digest of the bundle it holds.
+referrer_bundle() {
+  local name="$1" referrer="$2" predicate_type="$3" referrer_manifest bundle_digest
+  check_blob "$referrer" "$(jq -er --arg digest "$referrer" '.manifests[] | select(.digest == $digest) | .size' "$layout/index.json")"
+  referrer_manifest="$layout/blobs/sha256/${referrer#sha256:}"
+  if ! jq -e --arg digest "sha256:$manifest_sha" --argjson size "$manifest_size" \
+    --arg bundle "$sigstore_bundle_type" --arg predicate "$predicate_type" '
+    .mediaType == "application/vnd.oci.image.manifest.v1+json" and .artifactType == $bundle and
+    .subject.digest == $digest and .subject.size == $size and
+    .annotations["dev.sigstore.bundle.predicateType"] == $predicate and
+    (.layers | length == 1) and .layers[0].mediaType == $bundle' "$referrer_manifest" >/dev/null; then
+    echo "the $name is not a Sigstore bundle referrer of the signed manifest" >&2
+    exit 1
+  fi
+  bundle_digest="$(jq -er '.layers[0].digest' "$referrer_manifest")"
+  check_blob "$bundle_digest" "$(jq -er '.layers[0].size' "$referrer_manifest")"
+  echo "$bundle_digest"
+}
+
+# A recorded signature referrer holds exactly the detached bundle verified above.
+signature_referrer="$(jq -r '.signature.digest // empty' "$package_output/release.json")"
+if [ -n "$signature_referrer" ]; then
+  signature_blob="$(referrer_bundle signature "$signature_referrer" "$signature_predicate_type")"
+  if ! cmp -s "$bundle" "$layout/blobs/sha256/${signature_blob#sha256:}"; then
+    echo "the signature referrer does not hold the verified signature bundle" >&2
+    exit 1
+  fi
+fi
+
 # Each recorded attestation is a referrer of exactly this manifest holding one
 # Sigstore bundle, which Cosign verifies as a statement about the package
 # digest with the same key. Whether a publisher requires them is the trust
@@ -102,19 +137,7 @@ attestations="$(jq -r '(.attestations // {}) | to_entries[] | [.key, .value.dige
 verified=0
 while IFS=$'\t' read -r name referrer predicate_type; do
   if [ -z "$name" ]; then continue; fi
-  check_blob "$referrer" "$(jq -er --arg digest "$referrer" '.manifests[] | select(.digest == $digest) | .size' "$layout/index.json")"
-  referrer_manifest="$layout/blobs/sha256/${referrer#sha256:}"
-  if ! jq -e --arg digest "sha256:$manifest_sha" --argjson size "$manifest_size" \
-    --arg bundle "$sigstore_bundle_type" --arg predicate "$predicate_type" '
-    .mediaType == "application/vnd.oci.image.manifest.v1+json" and .artifactType == $bundle and
-    .subject.digest == $digest and .subject.size == $size and
-    .annotations["dev.sigstore.bundle.predicateType"] == $predicate and
-    (.layers | length == 1) and .layers[0].mediaType == $bundle' "$referrer_manifest" >/dev/null; then
-    echo "the $name attestation is not a Sigstore bundle referrer of the signed manifest" >&2
-    exit 1
-  fi
-  bundle_digest="$(jq -er '.layers[0].digest' "$referrer_manifest")"
-  check_blob "$bundle_digest" "$(jq -er '.layers[0].size' "$referrer_manifest")"
+  bundle_digest="$(referrer_bundle "$name attestation" "$referrer" "$predicate_type")"
   if ! output="$(offline_cosign \
     --mount "type=bind,src=$(cd "$(dirname "$public_key")" && pwd),dst=/trust,readonly" \
     --mount "type=bind,src=$(cd "$package_output" && pwd),dst=/package,readonly" \

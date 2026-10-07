@@ -12,6 +12,8 @@ kind_node_image=kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd
 sigstore_bundle_type=application/vnd.dev.sigstore.bundle.v0.3+json
 sbom_predicate_type=https://spdx.dev/Document
 provenance_predicate_type=https://stellwerk.dev/attestation/source-provenance/v1
+# Cosign's predicate type for a message signature bundle kept as a referrer.
+signature_predicate_type=https://sigstore.dev/cosign/sign/v1
 
 # docker_platform prints the daemon platform as linux/amd64 or linux/arm64.
 docker_platform() {
@@ -61,14 +63,17 @@ offline_cosign() {
 # attach_bundle SUBJECT BUNDLE PREDICATE_TYPE [ORAS_FLAGS...] attaches a
 # Sigstore bundle file as an OCI referrer of SUBJECT (an absolute layout path
 # or a registry reference, with digest) and prints the referrer manifest
-# digest. The layer is titled with the bundle's file name.
+# digest. The layer is titled with the bundle's file name; the content
+# annotation names what the bundle holds (message-signature or dsse-envelope).
 attach_bundle() {
-  local subject="$1" bundle="$2" predicate_type="$3"
+  local subject="$1" bundle="$2" predicate_type="$3" content
   shift 3
+  content="$(jq -er 'if .messageSignature then "message-signature" elif .dsseEnvelope then "dsse-envelope"
+    else error("not a Sigstore bundle") end' "$bundle")"
   (
     cd "$(dirname "$bundle")" || exit 1
     timeout -k 5s 60s oras attach "$@" --artifact-type "$sigstore_bundle_type" \
-      --annotation dev.sigstore.bundle.content=dsse-envelope \
+      --annotation "dev.sigstore.bundle.content=$content" \
       --annotation "dev.sigstore.bundle.predicateType=$predicate_type" --format json \
       "$subject" "$(basename "$bundle"):$sigstore_bundle_type" | jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))'
   )

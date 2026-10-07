@@ -7,10 +7,23 @@ private_key="${2:?usage: sign-layout-manifest.sh PACKAGE_OUTPUT PRIVATE_KEY}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$root/scripts/images.sh"
 
+for command in docker oras jq shasum; do
+  command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
+done
 test -s "$package_output/oci-manifest.json"
 test -s "$private_key"
 package_dir="$(cd "$package_output" && pwd)"
 key_dir="$(cd "$(dirname "$private_key")" && pwd)"
+release="$package_dir/release.json"
+digest="$(jq -er '.packageDigest | select(test("^sha256:[0-9a-f]{64}$"))' "$release")"
+if [ "sha256:$(shasum -a 256 "$package_dir/oci-manifest.json" | awk '{print $1}')" != "$digest" ]; then
+  echo "oci-manifest.json is not the package manifest recorded in release.json" >&2
+  exit 1
+fi
+if ! jq -e '.signature == null' "$release" >/dev/null; then
+  echo "the package is already signed; rebuild it to sign again" >&2
+  exit 1
+fi
 require_image "$cosign_image" "$(docker_platform)"
 
 # managed-key-no-tlog: authenticate the exact exported OCI manifest with the
@@ -26,4 +39,12 @@ offline_cosign \
   -- sign-blob --yes --signing-config=/config/signing-config.json \
   --key "/key/$(basename "$private_key")" \
   --bundle /package/oci-manifest.sigstore.json /package/oci-manifest.json >/dev/null
+
+# The same bundle also travels as a referrer of the package manifest
+# (Cosign's bundle referrer convention), so that `oras cp -r` mirrors and the
+# offline bundle carry it; release.json records its digest.
+signature_digest="$(attach_bundle "$package_dir/oci-layout@$digest" "$package_dir/oci-manifest.sigstore.json" \
+  "$signature_predicate_type" --oci-layout)"
+jq --arg digest "$signature_digest" '.signature = {digest: $digest}' "$release" >"$release.new"
+mv -- "$release.new" "$release"
 echo "$package_dir/oci-manifest.sigstore.json"

@@ -188,7 +188,10 @@ convention: artifact type `application/vnd.dev.sigstore.bundle.v0.3+json`,
 annotation `dev.sigstore.bundle.predicateType`). `release.json` records the
 referrer digests under `attestations`; they go into
 `package.attestations.sbom` and `package.attestations.provenance`.
-`verify-layout-manifest.sh` verifies the recorded attestations too, and
+`sign-layout-manifest.sh` attaches the detached signature bundle the same
+way (predicate type `https://sigstore.dev/cosign/sign/v1`, content
+`message-signature`) and records it as `release.json .signature.digest`.
+`verify-layout-manifest.sh` verifies the recorded referrers too, and
 `oras cp -r` and the offline bundle carry them with the package.
 
 The SBOM is an input: none of the pinned tools (Cosign, ORAS, the Go

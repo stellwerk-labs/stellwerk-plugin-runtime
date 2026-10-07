@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,6 +58,21 @@ func newExecCase(t *testing.T) execCase {
 // kernel executable name reported by the started plugin.
 func (c execCase) launch(t *testing.T, mode string, extraArgs ...string) (string, string, error) {
 	t.Helper()
+	output, err := c.start(t, mode, nil, extraArgs...)
+	if err != nil {
+		return "", "", err
+	}
+	executed, name, ok := strings.Cut(strings.TrimSpace(output), " ")
+	if !ok || (executed != verifiedMarker && executed != swappedMarker) {
+		t.Fatalf("unexpected plugin report %q", output)
+	}
+	return executed, name, nil
+}
+
+// start runs the launcher in a child process whose environment also holds
+// env and returns what the started plugin printed.
+func (c execCase) start(t *testing.T, mode string, env []string, extraArgs ...string) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	self, err := os.Executable()
@@ -70,18 +86,14 @@ func (c execCase) launch(t *testing.T, mode string, extraArgs ...string) (string
 		"--platform=" + c.in.platform, "--development-untrusted",
 	}, extraArgs...)
 	command := exec.CommandContext(ctx, self, args...)
-	command.Env = []string{"RUNTIME_TEST_LAUNCHER=" + mode, "RUNTIME_TEST_REPLACEMENT=" + c.replacement}
+	command.Env = append([]string{"RUNTIME_TEST_LAUNCHER=" + mode, "RUNTIME_TEST_REPLACEMENT=" + c.replacement}, env...)
 	var stderr strings.Builder
 	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		return "", "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	executed, name, ok := strings.Cut(strings.TrimSpace(string(output)), " ")
-	if !ok || (executed != verifiedMarker && executed != swappedMarker) {
-		t.Fatalf("unexpected plugin report %q", output)
-	}
-	return executed, name, nil
+	return string(output), nil
 }
 
 func TestRunExecutesTheSealedVerifiedImage(t *testing.T) {
@@ -105,6 +117,32 @@ func TestRunExecutesTheSealedVerifiedImage(t *testing.T) {
 	}
 	if info.Mode().Perm()&0111 != 0 {
 		t.Fatalf("package executable mode %o; execution must not depend on it", info.Mode().Perm())
+	}
+}
+
+// The executed plugin learns which installation it is and which package the
+// launcher verified, so it can report both to Core. An inherited digest never
+// replaces the verified one.
+func TestRunHandsThePluginItsInstallationAndVerifiedPackageDigest(t *testing.T) {
+	const installation = "0b7e6c1a-3f52-4d8e-9a41-6c2f0e8d5b17"
+	c := newExecCase(t)
+	output, err := c.start(t, "run", []string{
+		"STELLWERK_PLUGIN_EXEC_PROBE=environment", "STELLWERK_INSTALLATION_ID=" + installation,
+		"STELLWERK_PACKAGE_SHA256=" + strings.Repeat("0", 64), "HOME=/ambient",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := strings.Split(strings.TrimSpace(output), "\n")
+	for _, expected := range []string{"STELLWERK_INSTALLATION_ID=" + installation, "STELLWERK_PACKAGE_SHA256=" + c.in.expectedHash, "PLUGIN_ID=" + execProbeID} {
+		if !slices.Contains(environment, expected) {
+			t.Fatalf("plugin environment lacks %s: %q", expected, environment)
+		}
+	}
+	for _, item := range environment {
+		if strings.HasPrefix(item, "HOME=") || strings.HasPrefix(item, "RUNTIME_TEST_") || item == "STELLWERK_PACKAGE_SHA256="+strings.Repeat("0", 64) {
+			t.Fatalf("plugin environment carries %s", item)
+		}
 	}
 }
 
@@ -229,22 +267,24 @@ func TestRunFailsClosedBeforeExec(t *testing.T) {
 	for _, test := range []struct {
 		name, reason string
 		mutate       func(c execCase) error
-		args         []string
+		args, env    []string
 	}{
 		{"tampered executable", "executable digest mismatch", func(c execCase) error {
 			return swapExecutable(c.executable, "rename", c.replacement)
-		}, nil},
+		}, nil, nil},
 		{"symlinked executable", "symlink", func(c execCase) error {
 			if err := os.Remove(c.executable); err != nil {
 				return err
 			}
 			return os.Symlink(c.replacement, c.executable)
-		}, nil},
+		}, nil, nil},
 		{"missing receipt", "validated runtime state unavailable", func(c execCase) error {
 			return os.Remove(c.in.stateFile)
-		}, nil},
-		{"wrong platform", "plugin_incompatible: platform executable", nil, []string{"--platform=linux/riscv64"}},
-		{"untrusted without development mode", "package trust state is not executable", nil, []string{"--development-untrusted=false"}},
+		}, nil, nil},
+		{"wrong platform", "plugin_incompatible: platform executable", nil, []string{"--platform=linux/riscv64"}, nil},
+		{"untrusted without development mode", "package trust state is not executable", nil, []string{"--development-untrusted=false"}, nil},
+		{"non-canonical installation ID", "STELLWERK_INSTALLATION_ID must be the installation UUID Core assigned", nil, nil,
+			[]string{"STELLWERK_INSTALLATION_ID=0B7E6C1A-3F52-4D8E-9A41-6C2F0E8D5B17"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			c := newExecCase(t)
@@ -253,9 +293,9 @@ func TestRunFailsClosedBeforeExec(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			executed, _, err := c.launch(t, "run", test.args...)
+			output, err := c.start(t, "run", test.env, test.args...)
 			if err == nil {
-				t.Fatalf("launcher started a plugin with image %s", executed)
+				t.Fatalf("launcher started a plugin that reported %q", output)
 			}
 			if !strings.Contains(err.Error(), test.reason) {
 				t.Fatalf("expected %q, got %v", test.reason, err)

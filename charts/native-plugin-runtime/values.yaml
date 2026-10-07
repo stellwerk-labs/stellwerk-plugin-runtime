@@ -6,6 +6,13 @@ plugin:
   version: ""
   port: 8080
 
+# Installation UUID Core assigned (canonical lowercase). The plugin receives
+# it as STELLWERK_INSTALLATION_ID, next to STELLWERK_PACKAGE_SHA256 from the
+# package verification, and reports both to Core, which activates the
+# installation only for a plugin that names it. Required with
+# workloadIdentity.enabled.
+installationId: ""
+
 # Generic static serving uses the same runtime image and signed package. TLS
 # terminates at the Console Gateway; no backend credentials enter this container.
 ui:
@@ -216,8 +223,9 @@ preStopDelaySeconds: 5
 terminationGracePeriodSeconds: 15
 
 # Only these explicitly supplied names reach the executable. The launcher also
-# filters its process environment to STELLWERK_PLUGIN_*, OTEL_*, SSL_CERT_FILE and
-# STELLWERK_CORE_TOKEN_FILE, which workloadIdentity sets.
+# filters its process environment to STELLWERK_PLUGIN_*, OTEL_*, SSL_CERT_FILE,
+# STELLWERK_CORE_TOKEN_FILE, which workloadIdentity sets, and
+# STELLWERK_INSTALLATION_ID, which installationId sets.
 pluginEnv: []
 
 # Operator-owned configuration mounted only into the plugin container. Use a

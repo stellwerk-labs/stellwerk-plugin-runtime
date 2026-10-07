@@ -94,10 +94,21 @@ Requirements and consequences:
   from a close-on-exec memfd and are not part of `native-static-v1`.
 
 `run` hands the plugin a filtered environment: only `STELLWERK_PLUGIN_*`,
-`OTEL_*`, `SSL_CERT_FILE` and `STELLWERK_CORE_TOKEN_FILE` pass through, plus `PLUGIN_ID`,
-`PLUGIN_VERSION`, `PLUGIN_LISTEN`, `PLUGIN_STATE` and `PLUGIN_TRUST_STATE`.
-The plugin becomes the container's PID 1, so it receives `SIGTERM` directly
-and must handle it to shut down cleanly.
+`OTEL_*`, `SSL_CERT_FILE`, `STELLWERK_CORE_TOKEN_FILE` and
+`STELLWERK_INSTALLATION_ID` pass through, plus `PLUGIN_ID`, `PLUGIN_VERSION`,
+`PLUGIN_LISTEN`, `PLUGIN_STATE`, `PLUGIN_TRUST_STATE` and
+`STELLWERK_PACKAGE_SHA256`. The plugin becomes the container's PID 1, so it
+receives `SIGTERM` directly and must handle it to shut down cleanly.
+
+A plugin reports two of these values to Core in its status at
+`/.well-known/stellwerk/plugin-status` on its backend origin. Core activates
+an installation only while the running plugin states exactly the
+installation UUID and package digest Core recorded for it:
+
+| Variable | Value |
+|---|---|
+| `STELLWERK_INSTALLATION_ID` | The installation UUID Core assigned, set by the chart from `installationId`. `run` refuses to start the plugin when the variable is present but not a canonical lowercase UUID. |
+| `STELLWERK_PACKAGE_SHA256` | The lowercase hex SHA-256 of the package manifest `run` verified before it started the process. It always comes from that verification; an inherited value never reaches the plugin. |
 
 ## Trust
 
@@ -337,8 +348,10 @@ Gateway and, with `ui.gateway.issuerName`, a cert-manager Certificate.
 instead of a long-lived service-user token (`v1alpha`, see
 [Plugin workload identity](https://docs.stellwerk.dev/platform-orchestrator/docs/architecture/plugins/plugin-workload-identity/)).
 It needs Kubernetes 1.29 or newer, the chart's own ServiceAccount
-(`serviceAccount.create=true`) and an IAM workload binding for exactly that
-ServiceAccount, its namespace and `workloadIdentity.audience`.
+(`serviceAccount.create=true`), an IAM workload binding for exactly that
+ServiceAccount, its namespace and `workloadIdentity.audience`, and
+`installationId`, the installation UUID Core assigned (see
+[Execution](#execution)).
 
 ```text
 core-token sidecar                    Core gateway -> IAM

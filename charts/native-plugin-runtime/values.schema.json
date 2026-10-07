@@ -30,6 +30,7 @@
         "port": {"type": "integer", "minimum": 1, "maximum": 65535}
       }
     },
+    "installationId": {"type": "string", "pattern": "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$"},
     "ui": {
       "type": "object", "additionalProperties": false,
       "required": ["enabled", "port", "consoleOrigin", "resources"],
@@ -352,6 +353,10 @@
           }}
         }
       }
+    },
+    {
+      "if": {"properties": {"workloadIdentity": {"properties": {"enabled": {"const": true}}}}},
+      "then": {"properties": {"installationId": {"minLength": 1}}}
     },
     {
       "if": {"properties": {"migration": {"properties": {"enabled": {"const": true}}}}},

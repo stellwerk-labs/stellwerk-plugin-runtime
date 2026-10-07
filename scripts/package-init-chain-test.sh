@@ -312,20 +312,24 @@ test "$(jq -r .trustState "$workspace/package/runtime-state.json")" = verified-l
 
 # The verified package actually runs from the read-only mount. The plugin
 # container gets a loopback-published port only so this script can query it.
+# The plugin receives the installation UUID and the verified manifest digest;
+# a digest planted in the container environment never reaches it.
+installation_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 timeout -k 5s 30s docker run --detach --pull=never --platform "$platform" --name "$plugin" \
   --user 65532:65532 --read-only --cap-drop ALL --security-opt no-new-privileges \
   --pids-limit 32 --memory 256m --cpus 0.5 --tmpfs '/tmp:rw,noexec,nosuid,size=16m,mode=1777' \
   --tmpfs '/state:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700' \
   --publish 127.0.0.1::8080 \
+  --env STELLWERK_INSTALLATION_ID="$installation_id" --env STELLWERK_PACKAGE_SHA256="$(printf '%064d' 0)" \
   --mount "type=bind,src=$workspace/package,dst=/package,readonly" "$runtime_image" \
   run "${runtime_common[@]}" --plugin-state=/state --listen=0.0.0.0:8080 >/dev/null
-python3 - "$(docker port "$plugin" 8080/tcp | head -n 1)" "$plugin_id" "$plugin_version" <<'PY'
+python3 - "$(docker port "$plugin" 8080/tcp | head -n 1)" "$plugin_id" "$plugin_version" "$installation_id" "$manifest_hash" <<'PY'
 import json
 import sys
 import time
 import urllib.request
 
-address, plugin_id, version = sys.argv[1:]
+address, plugin_id, version, installation_id, manifest_hash = sys.argv[1:]
 for _ in range(50):
     try:
         with urllib.request.urlopen(f"http://{address}/v1/info", timeout=1) as response:
@@ -338,6 +342,7 @@ else:
 assert info["id"] == plugin_id and info["version"] == version, info
 assert info["trust"] == "verified-local-key", info
 assert info["uid"] == 65532 and info["pid"] == 1, info
+assert info["installationId"] == installation_id and info["packageSha256"] == manifest_hash, info
 PY
 timeout -k 5s 30s docker stop --timeout 5 "$plugin" >/dev/null
 test "$(docker inspect --format '{{.State.ExitCode}}' "$plugin")" = 0

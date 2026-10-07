@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -183,21 +184,44 @@ func TestStrictManifest(t *testing.T) {
 }
 
 func TestFilteredEnvironment(t *testing.T) {
-	result := filteredEnvironment([]string{
+	const installation = "0b7e6c1a-3f52-4d8e-9a41-6c2f0e8d5b17"
+	verified := strings.Repeat("ab", 32)
+	result, err := filteredEnvironment([]string{
 		"HOME=/secret", "DATABASE_URL=postgres://ambient", "STELLWERK_PLUGIN_CP_URL=https://cp",
 		"OTEL_SERVICE_NAME=probe", "SSL_CERT_FILE=/certs/ca.pem",
 		"STELLWERK_CORE_TOKEN_FILE=/run/stellwerk/core-token/token", "STELLWERK_CORE_TOKEN=PWT-ambient",
-	}, map[string]string{"PLUGIN_ID": "dev.stellwerk.probe"})
+		"STELLWERK_INSTALLATION_ID=" + installation, "STELLWERK_PACKAGE_SHA256=" + strings.Repeat("0", 64),
+	}, map[string]string{"PLUGIN_ID": "dev.stellwerk.probe", packageDigestEnvironment: verified})
+	if err != nil {
+		t.Fatal(err)
+	}
 	joined := strings.Join(result, "\n")
-	for _, expected := range []string{"PLUGIN_ID=", "STELLWERK_PLUGIN_CP_URL=", "OTEL_SERVICE_NAME=", "SSL_CERT_FILE=", "STELLWERK_CORE_TOKEN_FILE=/run/stellwerk/core-token/token"} {
+	for _, expected := range []string{"PLUGIN_ID=", "STELLWERK_PLUGIN_CP_URL=", "OTEL_SERVICE_NAME=", "SSL_CERT_FILE=", "STELLWERK_CORE_TOKEN_FILE=/run/stellwerk/core-token/token",
+		"STELLWERK_INSTALLATION_ID=" + installation, "STELLWERK_PACKAGE_SHA256=" + verified} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("missing %s in %q", expected, joined)
 		}
 	}
-	for _, forbidden := range []string{"HOME=", "DATABASE_URL=", "STELLWERK_CORE_TOKEN="} {
+	for _, forbidden := range []string{"HOME=", "DATABASE_URL=", "STELLWERK_CORE_TOKEN=", "STELLWERK_PACKAGE_SHA256=" + strings.Repeat("0", 64)} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("leaked %s in %q", forbidden, joined)
 		}
+	}
+}
+
+// The installation UUID is the identity Core compares at activation, so a
+// malformed one stops the launcher instead of reaching the plugin.
+func TestFilteredEnvironmentRefusesANonCanonicalInstallationID(t *testing.T) {
+	for _, value := range []string{"", "0B7E6C1A-3F52-4D8E-9A41-6C2F0E8D5B17", "{0b7e6c1a-3f52-4d8e-9a41-6c2f0e8d5b17}",
+		"0b7e6c1a3f524d8e9a416c2f0e8d5b17", "0b7e6c1a-3f52-4d8e-9a41-6c2f0e8d5b17 ", "installation"} {
+		if result, err := filteredEnvironment([]string{"STELLWERK_INSTALLATION_ID=" + value}, nil); err == nil ||
+			!strings.Contains(err.Error(), "STELLWERK_INSTALLATION_ID must be the installation UUID Core assigned") {
+			t.Fatalf("installation ID %q: %v, %q", value, err, result)
+		}
+	}
+	result, err := filteredEnvironment([]string{"PATH=/bin"}, map[string]string{"PLUGIN_ID": "dev.stellwerk.probe"})
+	if err != nil || slices.ContainsFunc(result, func(item string) bool { return strings.HasPrefix(item, installationEnvironment+"=") }) {
+		t.Fatalf("an absent installation ID must stay absent: %v, %q", err, result)
 	}
 }
 

@@ -51,6 +51,7 @@ func main() {
 			"id": os.Getenv("PLUGIN_ID"), "version": version, "protocol": 1,
 			"trust": os.Getenv("PLUGIN_TRUST_STATE"), "uid": os.Getuid(), "pid": os.Getpid(),
 			"note": string(note), "ambientCanaryPresent": os.Getenv("AMBIENT_CANARY") != "",
+			"installationId": os.Getenv("STELLWERK_INSTALLATION_ID"), "packageSha256": os.Getenv("STELLWERK_PACKAGE_SHA256"),
 		})
 	})
 	mux.HandleFunc("POST /v1/note", func(writer http.ResponseWriter, request *http.Request) {

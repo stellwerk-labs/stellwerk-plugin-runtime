@@ -627,17 +627,19 @@ fi
 # sidecar mounts the projected ServiceAccount token; the plugin gets the
 # memory-backed Core token file and nothing else.
 for document in rendered ui migration-rendered; do
-  if grep -E -q 'core-token|serviceAccountToken|STELLWERK_CORE_TOKEN_FILE' "$fixture/$document.yaml"; then
+  if grep -E -q 'core-token|serviceAccountToken|STELLWERK_CORE_TOKEN_FILE|STELLWERK_INSTALLATION_ID' "$fixture/$document.yaml"; then
     echo "$document.yaml carries workload identity although it is disabled" >&2
     exit 1
   fi
 done
+installation_id=0b7e6c1a-3f52-4d8e-9a41-6c2f0e8d5b17
 workload_args=(
   "${ui_args[@]}"
   --set workloadIdentity.enabled=true
   --set-string workloadIdentity.audience=stellwerk-plugin-workload
   --set-string workloadIdentity.gateway.url=https://api.example.test
   --set-string workloadIdentity.gateway.caSecret.name=gateway-ca
+  --set-string installationId="$installation_id"
 )
 helm lint charts/native-plugin-runtime "${workload_args[@]}" >/dev/null
 helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" >"$fixture/workload.yaml"
@@ -676,6 +678,9 @@ for name in ["fetch-package-envelope", "verify-package-envelope", "pull-package"
     assert "core-token" not in {**init_blocks, **main_blocks}[name], name
 plugin = main_blocks["plugin"]
 assert "- name: STELLWERK_CORE_TOKEN_FILE\n              value: /run/stellwerk/core-token/token" in plugin
+# The installation UUID Core assigned reaches the plugin container only.
+assert '- name: STELLWERK_INSTALLATION_ID\n              value: "0b7e6c1a-3f52-4d8e-9a41-6c2f0e8d5b17"' in plugin
+assert deployment.count("STELLWERK_INSTALLATION_ID") == 1
 assert re.search(r"- name: core-token\n\s+mountPath: /run/stellwerk/core-token\n\s+readOnly: true", plugin)
 projected = volume_blocks["workload-token"]
 for expected in ['audience: "stellwerk-plugin-workload"', "expirationSeconds: 600", "path: token", "defaultMode: 0440"]:
@@ -687,9 +692,10 @@ assert "      automountServiceAccountToken: false\n" in deployment
 PY
 helm template native-probe charts/native-plugin-runtime "${migration_args[@]}" "${migration_job[@]}" \
   --set workloadIdentity.enabled=true --set-string workloadIdentity.audience=stellwerk-plugin-workload \
-  --set-string workloadIdentity.gateway.url=https://api.example.test >"$fixture/migration-workload.yaml"
-if grep -E -q 'core-token|serviceAccountToken' "$fixture/migration-workload.yaml"; then
-  echo "the migration Job received the Core token exchange" >&2
+  --set-string workloadIdentity.gateway.url=https://api.example.test \
+  --set-string installationId="$installation_id" >"$fixture/migration-workload.yaml"
+if grep -E -q 'core-token|serviceAccountToken|STELLWERK_INSTALLATION_ID' "$fixture/migration-workload.yaml"; then
+  echo "the migration Job received the Core token exchange or the installation UUID" >&2
   exit 1
 fi
 # Helm applies --set-string after --set, so string overrides use --set-string.
@@ -697,12 +703,24 @@ for invalid in "--set-string=workloadIdentity.audience=" "--set-string=workloadI
   "--set-string=workloadIdentity.gateway.url=http://api.example.test" \
   "--set-string=workloadIdentity.gateway.url=https://api.example.test/iam" \
   "--set=workloadIdentity.expirationSeconds=3600" "--set=workloadIdentity.expirationSeconds=599" \
-  "--set=serviceAccount.create=false,serviceAccount.name=shared" "--set=serviceAccount.projectedIdentity.enabled=true"; do
+  "--set=serviceAccount.create=false,serviceAccount.name=shared" "--set=serviceAccount.projectedIdentity.enabled=true" \
+  "--set-string=installationId=" "--set-string=installationId=0B7E6C1A-3F52-4D8E-9A41-6C2F0E8D5B17" \
+  "--set-string=installationId=0b7e6c1a3f524d8e9a416c2f0e8d5b17" "--set-string=installationId=installation-1"; do
   if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" "$invalid" >/dev/null 2>&1; then
     echo "chart accepted workload identity setting $invalid" >&2
     exit 1
   fi
 done
+# Without workload identity the installation UUID is optional, and a given
+# one must still be canonical.
+helm template native-probe charts/native-plugin-runtime "${runtime_args[@]}" \
+  --set-string installationId="$installation_id" >"$fixture/installation.yaml"
+grep -Fq "value: \"$installation_id\"" "$fixture/installation.yaml"
+if helm template native-probe charts/native-plugin-runtime "${runtime_args[@]}" \
+  --set-string installationId=0B7E6C1A-3F52-4D8E-9A41-6C2F0E8D5B17 >/dev/null 2>&1; then
+  echo "chart accepted a non-canonical installation UUID" >&2
+  exit 1
+fi
 if helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" --kube-version 1.28.0 >/dev/null 2>&1; then
   echo "chart rendered the native token sidecar for Kubernetes 1.28" >&2
   exit 1

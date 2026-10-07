@@ -231,6 +231,7 @@ development_scenario() {
   publish_package 1.1.0
   checks+=("two independently packaged OCI versions")
 
+  installation_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   helm_apply() {
     local version="$1"
     helm upgrade --install "$release" "$root/charts/native-plugin-runtime" \
@@ -241,6 +242,7 @@ development_scenario() {
       --set persistence.enabled=true \
       --set-string plugin.id=dev.stellwerk.native-probe \
       --set-string plugin.version="$version" \
+      --set-string installationId="$installation_id" \
       --set-string package.reference="$registry:5000/native-probe@$(package_field "$version" .packageDigest)" \
       --set-string package.manifestSHA256="$(package_field "$version" .manifestSHA256)" \
       --set package.plainHTTP=true \
@@ -257,9 +259,9 @@ development_scenario() {
   probe_port="$(random_port)"
   kube --namespace "$namespace" port-forward "service/$deployment" "$probe_port:8080" >"$workspace/port-forward.log" 2>&1 &
   port_forward_pid=$!
-  python3 - "$probe_port" 1.0.0 write <<'PY'
+  python3 - "$probe_port" 1.0.0 write "$installation_id" "$(package_field 1.0.0 .manifestSHA256)" <<'PY'
 import json, sys, time, urllib.request
-port, version, action = sys.argv[1:]
+port, version, action, installation_id, manifest_digest = sys.argv[1:]
 base = f"http://127.0.0.1:{port}"
 for _ in range(100):
     try:
@@ -273,11 +275,13 @@ assert info["version"] == version, info
 assert info["uid"] == 65532 and info["pid"] == 1, info
 assert info["trust"] == "untrusted-development", info
 assert info["note"] == "persistent kind state", info
+assert info["installationId"] == installation_id and info["packageSha256"] == manifest_digest, info
 PY
   kill "$port_forward_pid" >/dev/null 2>&1 || true
   wait "$port_forward_pid" 2>/dev/null || true
   port_forward_pid=""
   checks+=("non-root runtime and persistent probe state")
+  checks+=("plugin process receives the installation UUID and the verified package digest")
 
   # Sealed execution in a real node: the probe process runs from the memfd.
   node="$(kind get nodes --name "$cluster" | head -n 1)"
@@ -317,7 +321,10 @@ PY
   kube --namespace "$namespace" rollout status "deployment/$deployment" --timeout=90s >/dev/null
   runtime_after="$(kube --namespace "$namespace" get pod -l "$runtime_selector" -o jsonpath='{.items[0].spec.containers[0].image}')"
   test "$runtime_before" = "$runtime_after"
-  checks+=("package upgrade with identical runtime image digest")
+  pod_info "$(runtime_pods | head -n 1)" | jq -e --arg installation "$installation_id" \
+    --arg digest "$(package_field 1.1.0 .manifestSHA256)" '.installationId == $installation and .packageSha256 == $digest' >/dev/null ||
+    { echo "the upgraded plugin does not report the installation and the 1.1.0 package digest" >&2; exit 1; }
+  checks+=("package upgrade with identical runtime image digest; the plugin reports the new package digest")
 
   old_pod="$(kube --namespace "$namespace" get pod -l "$runtime_selector" -o jsonpath='{.items[0].metadata.name}')"
   kube --namespace "$namespace" delete pod "$old_pod" --wait=true >/dev/null
@@ -332,9 +339,9 @@ PY
   probe_port="$(random_port)"
   kube --namespace "$namespace" port-forward "service/$deployment" "$probe_port:8080" >"$workspace/port-forward.log" 2>&1 &
   port_forward_pid=$!
-  python3 - "$probe_port" 1.0.0 read <<'PY'
+  python3 - "$probe_port" 1.0.0 read "$installation_id" "$(package_field 1.0.0 .manifestSHA256)" <<'PY'
 import json, sys, time, urllib.request
-port, version, _ = sys.argv[1:]
+port, version, _, installation_id, manifest_digest = sys.argv[1:]
 base = f"http://127.0.0.1:{port}"
 for _ in range(100):
     try:
@@ -343,6 +350,7 @@ for _ in range(100):
     except OSError: time.sleep(.1)
 else: raise SystemExit("rolled-back plugin did not become ready")
 assert info["version"] == version and info["note"] == "persistent kind state", info
+assert info["installationId"] == installation_id and info["packageSha256"] == manifest_digest, info
 PY
   checks+=("state retained across upgrade, restart and rollback")
 

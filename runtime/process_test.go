@@ -32,8 +32,15 @@ func TestMain(m *testing.M) {
 }
 
 // reportExecutedImage prints the marker compiled into the running bytes and
-// what the kernel calls the executable.
+// what the kernel calls the executable, or with
+// STELLWERK_PLUGIN_EXEC_PROBE=environment the environment it was started with.
 func reportExecutedImage() {
+	if os.Getenv("STELLWERK_PLUGIN_EXEC_PROBE") == "environment" {
+		for _, item := range os.Environ() {
+			fmt.Println(item)
+		}
+		os.Exit(0)
+	}
 	name, err := os.Readlink("/proc/self/exe")
 	if err != nil {
 		name = "unavailable"

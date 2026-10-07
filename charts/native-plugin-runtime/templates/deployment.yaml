@@ -142,11 +142,15 @@ spec:
             {{- include "native-plugin-runtime.commonArgs" . | nindent 12 }}
             - --listen=0.0.0.0:{{ .Values.plugin.port }}
             - --plugin-state=/state
-          {{- if or .Values.pluginEnv .Values.workloadIdentity.enabled }}
+          {{- if or .Values.pluginEnv .Values.workloadIdentity.enabled .Values.installationId }}
           env:
             {{- if .Values.workloadIdentity.enabled }}
             - name: STELLWERK_CORE_TOKEN_FILE
               value: /run/stellwerk/core-token/token
+            {{- end }}
+            {{- with .Values.installationId }}
+            - name: STELLWERK_INSTALLATION_ID
+              value: {{ . | quote }}
             {{- end }}
             {{- with .Values.pluginEnv }}
             {{- toYaml . | nindent 12 }}

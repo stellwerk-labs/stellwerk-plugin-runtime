@@ -31,6 +31,21 @@ var (
 	pluginIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:[.-][a-z0-9]+)+$`)
 	versionPattern  = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
 	featurePattern  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	canonicalUUID   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
+
+// A plugin reports these two values to Core, which activates an installation
+// only while the running plugin states exactly the installation UUID and
+// package digest Core recorded for it.
+const (
+	// installationEnvironment carries the installation UUID Core assigned.
+	// The chart sets it from installationId; run passes it through only in
+	// canonical lowercase form.
+	installationEnvironment = "STELLWERK_INSTALLATION_ID"
+	// packageDigestEnvironment carries the SHA-256 of the package manifest run
+	// verified. It always comes from that verification, never from the
+	// environment the launcher inherits.
+	packageDigestEnvironment = "STELLWERK_PACKAGE_SHA256"
 )
 
 type executable struct {
@@ -284,14 +299,19 @@ func validate(in inputs) error {
 	})
 }
 
-func filteredEnvironment(source []string, additions map[string]string) []string {
+// filteredEnvironment is the plugin's whole environment: the allowlisted part
+// of source plus the launcher's additions, which win.
+func filteredEnvironment(source []string, additions map[string]string) ([]string, error) {
 	allowed := map[string]string{}
 	for _, item := range source {
 		name, value, ok := strings.Cut(item, "=")
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(name, "STELLWERK_PLUGIN_") || strings.HasPrefix(name, "OTEL_") || name == "SSL_CERT_FILE" || name == coreTokenEnvironment {
+		if name == installationEnvironment && !canonicalUUID.MatchString(value) {
+			return nil, fmt.Errorf("%s must be the installation UUID Core assigned, in canonical lowercase form", installationEnvironment)
+		}
+		if strings.HasPrefix(name, "STELLWERK_PLUGIN_") || strings.HasPrefix(name, "OTEL_") || name == "SSL_CERT_FILE" || name == coreTokenEnvironment || name == installationEnvironment {
 			allowed[name] = value
 		}
 	}
@@ -307,7 +327,7 @@ func filteredEnvironment(source []string, additions map[string]string) []string 
 	for _, name := range names {
 		result = append(result, name+"="+allowed[name])
 	}
-	return result
+	return result, nil
 }
 
 func validatedPackage(in inputs) (verifiedPackage, validationState, error) {
@@ -352,19 +372,20 @@ func prepareLaunch(in inputs) (launch, error) {
 	if err != nil {
 		return launch{}, err
 	}
+	env, err := filteredEnvironment(os.Environ(), map[string]string{
+		"PLUGIN_ID": pkg.manifest.PluginID, "PLUGIN_VERSION": pkg.manifest.PluginVersion,
+		"PLUGIN_LISTEN": in.listen, "PLUGIN_STATE": in.pluginState, "PLUGIN_TRUST_STATE": state.TrustState,
+		packageDigestEnvironment: pkg.manifestHash,
+	})
+	if err != nil {
+		return launch{}, err
+	}
 	image, err := sealedImage(pkg.binary)
 	if err != nil {
 		return launch{}, fmt.Errorf("seal verified executable: %w", err)
 	}
-	return launch{
-		image: image,
-		// argv[0] is only the conventional program name.
-		argv: []string{filepath.Join(in.packageDir, filepath.FromSlash(pkg.selected.Path))},
-		env: filteredEnvironment(os.Environ(), map[string]string{
-			"PLUGIN_ID": pkg.manifest.PluginID, "PLUGIN_VERSION": pkg.manifest.PluginVersion,
-			"PLUGIN_LISTEN": in.listen, "PLUGIN_STATE": in.pluginState, "PLUGIN_TRUST_STATE": state.TrustState,
-		}),
-	}, nil
+	// argv[0] is only the conventional program name.
+	return launch{image: image, argv: []string{filepath.Join(in.packageDir, filepath.FromSlash(pkg.selected.Path))}, env: env}, nil
 }
 
 func runPlugin(in inputs) error {

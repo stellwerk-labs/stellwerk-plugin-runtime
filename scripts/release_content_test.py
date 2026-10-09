@@ -215,10 +215,15 @@ class ReleaseContentTest(unittest.TestCase):
                         archive.addfile(entry, io.BytesIO(b"text"))
                         if kind == "duplicate":
                             archive.addfile(entry, io.BytesIO(b"text"))
-                with self.assertRaises(ValueError):
+                diagnostic = {
+                    "traversal": "unsafe or duplicate", "link": "unsupported",
+                    "duplicate": "unsafe or duplicate", "members": "content exceeds",
+                    "bytes": "source exceeds",
+                }[kind]
+                with self.assertRaisesRegex(ValueError, diagnostic):
                     release.unpack(source, self.root / (kind + "-output"),
                                    max_members=0 if kind == "members" else 20,
-                                   max_bytes=1 if kind == "bytes" else 100)
+                                   max_bytes=1 if kind == "bytes" else 20 * 1024)
                 self.assertFalse((self.root / "escape").exists())
 
     def test_nested_archives_are_scanned_and_depth_is_bounded(self):

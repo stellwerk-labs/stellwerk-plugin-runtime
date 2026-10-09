@@ -11,4 +11,11 @@ if ! (cd "$directory" && gitleaks dir --redact --no-banner --log-level error --c
   echo "secret scan failed (finding or scanner error); inspect locally with redaction" >&2
   exit 1
 fi
+# Gitleaks intentionally skips binary files. Inspect their printable strings as
+# a second stream, without writing extracted credentials into logs or reports.
+if ! python3 "$root/scripts/release_content.py" strings "$directory" |
+  gitleaks stdin --redact --no-banner --log-level error --config "$root/scripts/gitleaks.toml" >/dev/null 2>&1; then
+  echo "binary secret scan failed (finding or scanner error)" >&2
+  exit 1
+fi
 python3 "$root/scripts/release_content.py" scan "$directory" "$@"

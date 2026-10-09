@@ -16,6 +16,11 @@ import release_content as release
 
 
 class ReleaseContentTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("gitleaks"):
+            raise RuntimeError("pinned gitleaks is required for release-content tests")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -148,7 +153,6 @@ class ReleaseContentTest(unittest.TestCase):
         (seed / "binary").write_bytes(b"public content")
         release.scan(seed)
 
-    @unittest.skipUnless(shutil.which("gitleaks"), "install the pinned scanner first")
     def test_real_scanner_rejects_secret_seed_and_missing_input(self):
         scan = Path(__file__).with_name("scan-release-content.sh")
         seed = self.root / "seed"
@@ -161,7 +165,16 @@ class ReleaseContentTest(unittest.TestCase):
         missing = subprocess.run([str(scan), str(self.root / "missing")], capture_output=True)
         self.assertNotEqual(missing.returncode, 0)
 
-    @unittest.skipUnless(shutil.which("gitleaks"), "install the pinned scanner first")
+    def test_real_scanner_rejects_secret_inside_elf_nul_bytes(self):
+        scan = Path(__file__).with_name("scan-release-content.sh")
+        seed = self.root / "binary-seed"
+        seed.mkdir()
+        token = "ghp_" + "".join(random.Random(17).sample(string.ascii_letters + string.digits, 36))
+        (seed / "runtime").write_bytes(b"\x7fELF\x02\x01\0\xff\0github_token=" + token.encode() + b"\0\xff\0")
+        result = subprocess.run([str(scan), str(seed)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(token, result.stdout + result.stderr)
+
     def test_secret_removed_by_whiteout_is_still_scanned(self):
         token = "ghp_" + "".join(random.Random(17).sample(string.ascii_letters + string.digits, 36))
         layout, digest = self.image(deleted_secret="github_token=" + token)
@@ -174,7 +187,6 @@ class ReleaseContentTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(token, result.stdout + result.stderr)
 
-    @unittest.skipUnless(shutil.which("gitleaks"), "install the pinned scanner first")
     def test_allowlist_is_exact_and_source_scoped(self):
         scan = Path(__file__).with_name("scan-release-content.sh")
         seed = self.root / "seed"

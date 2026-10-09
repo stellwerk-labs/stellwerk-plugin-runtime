@@ -181,6 +181,17 @@ def scan(directory, forbidden=()):
                 raise ValueError("private reference scan found prohibited content")
 
 
+def binary_strings(directory):
+    for path in Path(directory).rglob("*"):
+        if path.is_symlink():
+            raise ValueError("refusing symlinked scan content")
+        if path.is_file():
+            data = path.read_bytes()
+            if b"\0" in data:
+                for value in re.findall(rb"[\x20-\x7e]{4,}", data):
+                    sys.stdout.buffer.write(value + b"\n")
+
+
 def main():
     command, *args = sys.argv[1:]
     if command == "notices":
@@ -193,6 +204,8 @@ def main():
         chart(*args)
     elif command == "scan":
         scan(args[0], args[1:])
+    elif command == "strings":
+        binary_strings(*args)
     else:
         raise ValueError("unknown release content command")
 

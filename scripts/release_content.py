@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import tarfile
+import zipfile
 
 
 REQUIRED_NOTICES = (
@@ -161,15 +162,19 @@ def export(layout, digest, output):
 
 
 def scan(directory, forbidden=()):
+    directory = Path(directory)
     common_patterns = [
         rb"/(?:Users|home)/[A-Za-z0-9_.-]+/",
         rb"github\.com/[^\s\"'<>]+-enterprise\b",
         rb"\bhttps?://[a-z0-9.-]+\.(?:internal|localdomain)\b",
     ] + [re.escape(value.encode()) for value in forbidden if value]
     text_patterns = [rb"\bWX[0-9]+\b", rb"\b(?:S1\.[0-9]+|PM[0-9]{2}|MO[0-9]{2}|[QCD][0-9]{2})\b"]
-    for path in Path(directory).rglob("*"):
+    for path in directory.rglob("*"):
         if path.is_symlink():
             raise ValueError("refusing symlinked scan content")
+        if any(re.search(pattern, path.relative_to(directory).as_posix().encode())
+               for pattern in common_patterns + text_patterns):
+            raise ValueError("private reference scan found prohibited content")
         if path.is_file():
             data = path.read_bytes()
             # Three-character planning identifiers collide with ELF machine
@@ -182,14 +187,91 @@ def scan(directory, forbidden=()):
 
 
 def binary_strings(directory):
-    for path in Path(directory).rglob("*"):
+    directory = Path(directory)
+    for path in directory.rglob("*"):
         if path.is_symlink():
             raise ValueError("refusing symlinked scan content")
+        # Filenames ship too, and can contain credentials independently of bytes.
+        sys.stdout.buffer.write(path.relative_to(directory).as_posix().encode() + b"\n")
         if path.is_file():
             data = path.read_bytes()
             if b"\0" in data:
                 for value in re.findall(rb"[\x20-\x7e]{4,}", data):
                     sys.stdout.buffer.write(value + b"\n")
+
+
+def unpack(directory, output, max_members=20000, max_bytes=512 * 1024 * 1024, max_depth=3):
+    """Expose archive members for scanning without trusting archive paths/types."""
+    directory, output = Path(directory), Path(output)
+    if not directory.is_dir() or directory.is_symlink() or output.exists():
+        raise ValueError("archive scan input must exist and output must be new")
+    remaining_members, remaining_bytes = max_members, max_bytes
+    output.mkdir()
+
+    def archive_path(path):
+        return path.name.endswith((".tar.gz", ".tgz", ".tar", ".zip"))
+
+    def extract(source, destination, depth):
+        nonlocal remaining_members, remaining_bytes
+        if depth > max_depth:
+            raise ValueError("archive nesting exceeds scan limit")
+        if source.stat().st_size > max_bytes:
+            raise ValueError("archive source exceeds scan limit")
+        destination.mkdir(parents=True)
+        seen = set()
+
+        def write(name, size, is_directory, stream):
+            nonlocal remaining_members, remaining_bytes
+            path = PurePosixPath(name.rstrip("/") if is_directory else name)
+            if (not name or path.is_absolute() or ".." in path.parts or not path.parts
+                    or str(path) != (name.rstrip("/") if is_directory else name)
+                    or "\\" in name or any(ord(char) < 32 for char in name) or str(path) in seen):
+                raise ValueError("unsafe or duplicate archive scan path")
+            seen.add(str(path))
+            remaining_members -= 1
+            remaining_bytes -= size
+            if remaining_members < 0 or remaining_bytes < 0 or size < 0:
+                raise ValueError("archive content exceeds scan limit")
+            target = destination / str(path)
+            if is_directory:
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                data = stream.read(size + 1)
+                if len(data) != size:
+                    raise ValueError("archive scan member size mismatch")
+                target.write_bytes(data)
+
+        if source.name.endswith(".zip"):
+            with zipfile.ZipFile(source) as archive:
+                for entry in archive.infolist():
+                    mode = entry.external_attr >> 16
+                    if mode & 0o170000 not in (0, 0o100000, 0o040000) or entry.flag_bits & 1:
+                        raise ValueError("unsupported archive scan entry")
+                    with archive.open(entry) as stream:
+                        write(entry.filename, entry.file_size, entry.is_dir(), stream)
+        else:
+            # Bound decompression before tarfile parses PAX/GNU headers too.
+            # Header sizes are attacker-controlled, not just member sizes.
+            opener = gzip.open if source.name.endswith((".tar.gz", ".tgz")) else open
+            with opener(source, "rb") as compressed:
+                raw = compressed.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise ValueError("archive decompression exceeds scan limit")
+            with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+                for entry in archive:
+                    if not (entry.isfile() or entry.isdir()):
+                        raise ValueError("unsupported archive scan entry")
+                    write(entry.name, entry.size, entry.isdir(), archive.extractfile(entry) if entry.isfile() else None)
+        for number, nested in enumerate(sorted(destination.rglob("*"))):
+            if nested.is_file() and archive_path(nested):
+                extract(nested, output / f"nested-{depth}-{remaining_members}-{number}", depth + 1)
+
+    for number, source in enumerate(sorted(directory.rglob("*"))):
+        if source.is_symlink():
+            raise ValueError("refusing symlinked archive scan input")
+        if source.is_file() and archive_path(source):
+            extract(source, output / str(number), 1)
 
 
 def main():
@@ -206,6 +288,8 @@ def main():
         scan(args[0], args[1:])
     elif command == "strings":
         binary_strings(*args)
+    elif command == "unpack":
+        unpack(*args)
     else:
         raise ValueError("unknown release content command")
 
@@ -213,6 +297,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError, KeyError, TypeError, tarfile.TarError, EOFError) as error:
+    except (ValueError, OSError, KeyError, TypeError, tarfile.TarError, zipfile.BadZipFile, EOFError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)

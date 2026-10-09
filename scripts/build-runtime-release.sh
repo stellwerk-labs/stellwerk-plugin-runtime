@@ -32,5 +32,5 @@ jq -n --arg version "$version" --arg commit "$(git -C "$root" rev-parse HEAD)" \
   --arg image "$digest" --arg go "$release_go_version" --argjson dirty "$dirty" \
   '{schemaVersion:1,version:$version,source:{commit:$commit,dirty:$dirty,created:$created},
     tools:{go:$go},image:{digest:$image,platforms:["linux/amd64","linux/arm64"]}}' >"$output/release.json"
-"$root/scripts/scan-release-content.sh" "$output/filesystems" "${RELEASE_FORBIDDEN_LITERAL:-}"
+"$root/scripts/scan-release-content.sh" "$output" "${RELEASE_FORBIDDEN_LITERAL:-}"
 echo "$output/release.json"

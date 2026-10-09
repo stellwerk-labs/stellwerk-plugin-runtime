@@ -85,6 +85,7 @@ jobs:
         env:
           RELEASE_FORBIDDEN_LITERAL: ${{ secrets.RUNTIME_FORBIDDEN_LITERAL || (github.event.repository.private && github.repository_owner || '') }}
         run: |
+          set -euo pipefail
           mkdir "$RUNNER_TEMP/scan-source"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/scan-source"
           ./scripts/scan-release-content.sh "$RUNNER_TEMP/scan-source" "$RELEASE_FORBIDDEN_LITERAL"
@@ -140,6 +141,7 @@ jobs:
         run: |
           ./scripts/build-runtime-release.sh 0.1.0 "$RUNNER_TEMP/runtime-release"
           ./scripts/generate-runtime-sbom.sh "$RUNNER_TEMP/runtime-release"
+          ./scripts/scan-release-content.sh "$RUNNER_TEMP/runtime-release" "$RELEASE_FORBIDDEN_LITERAL"
 
       - name: Run the runtime and UI under Docker Compose
         run: ./scripts/compose-test.sh

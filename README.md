@@ -484,8 +484,9 @@ offline bundle takes it from the layout. `check.sh` keeps it in line with
 
 `scripts/build-runtime-release.sh VERSION OUTPUT_DIRECTORY` builds that index,
 one archive per architecture containing the executable and the same notices,
-the Helm chart, and exact source/image metadata. It checks the exported image
-filesystems with pinned Gitleaks (redacted) and a private-reference scan.
+the Helm chart, and exact source/image metadata. It checks every image layer,
+the complete staged tree, shipping paths and bounded archive contents with
+pinned Gitleaks (redacted) and a private-reference scan.
 `scripts/generate-runtime-sbom.sh OUTPUT_DIRECTORY` uses digest-pinned Syft
 without network access to produce SPDX JSON for each image and archive.
 Neither command publishes artifacts. Source scanning permits only the exact
@@ -510,6 +511,9 @@ artifact digest and exact predicate, then compares downloaded release assets
 before publishing. Producer provenance uses the SLSA v1 predicate format; this
 does not claim a SLSA security level. A partial publication blocks a rerun and
 requires inspection of the original bytes and occupied destinations.
+First-time package setup is a separately approved operator action described in
+[the package bootstrap runbook](docs/runtime-package-bootstrap.md); the release
+workflow never bypasses its public-visibility gate to perform that setup.
 
 ## Checks
 

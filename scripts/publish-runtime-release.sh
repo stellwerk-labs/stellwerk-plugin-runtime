@@ -14,6 +14,7 @@ digest="$(jq -er --arg commit "$source_sha" --arg version "$version" \
   'select(.source.commit == $commit and .source.dirty == false and .version == $version) | .image.digest' "$output/release.json")"
 test "$(shasum -a 256 "$output/BUILD-SHA256SUMS" | awk '{print $1}')" = "$RELEASE_CHECKSUMS_SHA256"
 (cd "$output" && shasum -a 256 --check BUILD-SHA256SUMS >/dev/null)
+"$root/scripts/scan-release-content.sh" "$output" "$RELEASE_FORBIDDEN_LITERAL"
 python3 "$root/scripts/release_content.py" export "$output/runtime-image" "$digest" "$RUNNER_TEMP/publication-filesystems"
 "$root/scripts/scan-release-content.sh" "$RUNNER_TEMP/publication-filesystems" "$RELEASE_FORBIDDEN_LITERAL"
 
@@ -110,6 +111,8 @@ DOCKER_CONFIG="$anonymous" cosign_release verify "${verification[@]}" "$chart@$c
 assets=("$output/"*.tar.gz "$output/"*.tgz "$output/"*.spdx.json \
   "$output/"*.sigstore.json "$output/SHA256SUMS" "$output/release.json" \
   "$output/source-provenance.json")
+# Include generated signature/attestation bundles in the final staged scan too.
+"$root/scripts/scan-release-content.sh" "$output" "$RELEASE_FORBIDDEN_LITERAL"
 gh release upload "v$version" "${assets[@]}" --repo "$GITHUB_REPOSITORY"
 # Download the reserved assets and compare the original bytes before publishing.
 download="$RUNNER_TEMP/runtime-upload-proof"

@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 
 import release_content as release
 
@@ -160,6 +161,106 @@ class ReleaseContentTest(unittest.TestCase):
                     release.scan(seed, ["private-owner-seed"])
         (seed / "binary").write_bytes(b"public content")
         release.scan(seed)
+
+    def test_private_reference_in_shipping_path_is_refused(self):
+        forbidden = "private-owner-fixture"
+        notice = self.context / "licenses" / forbidden / "NOTICE"
+        notice.parent.mkdir()
+        notice.write_text("public notice text")
+        layout, digest = self.image()
+        output = self.root / "filesystems"
+        release.export(layout, digest, output)
+        with self.assertRaisesRegex(ValueError, "prohibited content"):
+            release.scan(output, [forbidden])
+
+    def test_final_metadata_notes_and_archive_paths_are_scanned(self):
+        scan = Path(__file__).with_name("scan-release-content.sh")
+        seed = self.root / "staged"
+        seed.mkdir()
+        forbidden = "private-owner-fixture"
+        token = "ghp_" + "".join(random.Random(17).sample(string.ascii_letters + string.digits, 36))
+        fixtures = {
+            "source-provenance.json": json.dumps({"source": forbidden}).encode(),
+            "runtime-image.spdx.json": json.dumps({"supplier": forbidden}).encode(),
+            "release-notes.md": forbidden.encode(),
+            "release.json": json.dumps({"extra": "github_token=" + token}).encode(),
+            "chart.tgz": gzip.compress(release.tar_bytes({"chart/" + forbidden + "/values.yaml": (b"public", 0o644)})),
+            "runtime.tar.gz": gzip.compress(release.tar_bytes({"licenses/NOTICE": (("github_token=" + token).encode(), 0o644)})),
+        }
+        for name, data in fixtures.items():
+            with self.subTest(asset=name):
+                path = seed / name
+                path.write_bytes(data)
+                result = subprocess.run([str(scan), str(seed), forbidden], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(forbidden, result.stdout + result.stderr)
+                self.assertNotIn(token, result.stdout + result.stderr)
+                path.unlink()
+        (seed / "public.md").write_text("public release content")
+        result = subprocess.run([str(scan), str(seed), forbidden], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_archive_scan_refuses_unsafe_paths_links_duplicates_and_limits(self):
+        for kind in ("traversal", "link", "duplicate", "members", "bytes"):
+            with self.subTest(kind=kind):
+                source = self.root / kind
+                source.mkdir()
+                with tarfile.open(source / "content.tar", "w") as archive:
+                    entry = tarfile.TarInfo("../escape" if kind == "traversal" else "notice")
+                    if kind == "link":
+                        entry.type, entry.linkname = tarfile.SYMTYPE, "../escape"
+                        archive.addfile(entry)
+                    else:
+                        entry.size = 4
+                        archive.addfile(entry, io.BytesIO(b"text"))
+                        if kind == "duplicate":
+                            archive.addfile(entry, io.BytesIO(b"text"))
+                with self.assertRaises(ValueError):
+                    release.unpack(source, self.root / (kind + "-output"),
+                                   max_members=0 if kind == "members" else 20,
+                                   max_bytes=1 if kind == "bytes" else 100)
+                self.assertFalse((self.root / "escape").exists())
+
+    def test_nested_archives_are_scanned_and_depth_is_bounded(self):
+        source = self.root / "nested"
+        source.mkdir()
+        nested = gzip.compress(release.tar_bytes({"private-owner-fixture/NOTICE": (b"public", 0o644)}))
+        (source / "outer.tgz").write_bytes(gzip.compress(release.tar_bytes({"inner.tgz": (nested, 0o644)})))
+        output = self.root / "nested-output"
+        release.unpack(source, output)
+        with self.assertRaises(ValueError):
+            release.scan(output, ["private-owner-fixture"])
+        with self.assertRaisesRegex(ValueError, "nesting"):
+            release.unpack(source, self.root / "depth-output", max_depth=1)
+
+    def test_compressed_headers_and_zip_paths_are_bounded(self):
+        source = self.root / "compressed-limit"
+        source.mkdir()
+        (source / "large.tgz").write_bytes(gzip.compress(b"\0" * 2048))
+        with self.assertRaisesRegex(ValueError, "decompression"):
+            release.unpack(source, self.root / "compressed-output", max_bytes=1024)
+        (source / "large.tgz").unlink()
+        with zipfile.ZipFile(source / "content.zip", "w") as archive:
+            archive.writestr("licenses/private-owner-fixture/NOTICE", "public")
+        output = self.root / "zip-output"
+        release.unpack(source, output)
+        with self.assertRaises(ValueError):
+            release.scan(output, ["private-owner-fixture"])
+        (source / "content.zip").unlink()
+        with zipfile.ZipFile(source / "content.zip", "w") as archive:
+            archive.writestr("../escape", "public")
+        with self.assertRaises(ValueError):
+            release.unpack(source, self.root / "unsafe-zip-output")
+
+    def test_secret_in_filename_is_scanned_without_echoing_it(self):
+        scan = Path(__file__).with_name("scan-release-content.sh")
+        seed = self.root / "path-seed"
+        seed.mkdir()
+        token = "ghp_" + "".join(random.Random(17).sample(string.ascii_letters + string.digits, 36))
+        (seed / token).write_text("public content")
+        result = subprocess.run([str(scan), str(seed)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(token, result.stdout + result.stderr)
 
     def test_real_scanner_rejects_secret_seed_and_missing_input(self):
         scan = Path(__file__).with_name("scan-release-content.sh")

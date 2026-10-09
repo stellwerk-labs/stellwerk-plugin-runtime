@@ -6,9 +6,16 @@ on:
       - main
       - release/plugin-runtime-v1
   pull_request:
+  workflow_call:
+    secrets:
+      RUNTIME_FORBIDDEN_LITERAL:
+        required: false
 
 permissions:
   contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -72,11 +79,11 @@ jobs:
           echo "$RUNNER_TEMP/release-tools" >> "$GITHUB_PATH"
 
       - name: Check release content contracts
-        run: python3 -m unittest discover -s scripts -p 'release_content_test.py' -v
+        run: python3 -m unittest discover -s scripts -p 'release_*_test.py' -v
 
       - name: Scan committed source with redaction
         env:
-          RELEASE_FORBIDDEN_LITERAL: ${{ github.event.repository.private && github.repository_owner || '' }}
+          RELEASE_FORBIDDEN_LITERAL: ${{ secrets.RUNTIME_FORBIDDEN_LITERAL || (github.event.repository.private && github.repository_owner || '') }}
         run: |
           mkdir "$RUNNER_TEMP/scan-source"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/scan-source"
@@ -129,7 +136,7 @@ jobs:
 
       - name: Build, inspect and scan release artifacts and generate SPDX SBOMs
         env:
-          RELEASE_FORBIDDEN_LITERAL: ${{ github.event.repository.private && github.repository_owner || '' }}
+          RELEASE_FORBIDDEN_LITERAL: ${{ secrets.RUNTIME_FORBIDDEN_LITERAL || (github.event.repository.private && github.repository_owner || '') }}
         run: |
           ./scripts/build-runtime-release.sh 0.1.0 "$RUNNER_TEMP/runtime-release"
           ./scripts/generate-runtime-sbom.sh "$RUNNER_TEMP/runtime-release"

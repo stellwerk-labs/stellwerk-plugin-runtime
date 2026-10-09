@@ -492,6 +492,25 @@ Neither command publishes artifacts. Source scanning permits only the exact
 literal response token in `TestTokenExchangeRejectsAnswersOutsideTheContract`,
 scoped to its test file in `scripts/gitleaks.toml`.
 
+The manual release workflow starts disabled. Publication requires the public
+`stellwerk-labs/stellwerk-plugin-runtime` repository with `main` as its default,
+`RUNTIME_PUBLIC_RELEASES_ENABLED=true`, an existing `runtime-release`
+environment with required human reviewers, and separately configured public
+image/chart packages. The `RUNTIME_FORBIDDEN_LITERAL` repository secret supplies
+the private owner/reference to the scan without exposing it in public source
+or logs. The workflow accepts an exact signed source SHA, the object SHA of
+a separately approved annotated signed tag, and reviewed notes with their
+SHA-256. It creates no repository or tag and changes no package visibility.
+
+The workflow runs native qualification, preserves the built bytes as an
+immutable workflow artifact, and waits for human review before reserving a
+draft or uploading to registries. It verifies keyless signatures and SPDX and
+producer provenance attestations against the workflow identity, source commit,
+artifact digest and exact predicate, then compares downloaded release assets
+before publishing. Producer provenance uses the SLSA v1 predicate format; this
+does not claim a SLSA security level. A partial publication blocks a rerun and
+requires inspection of the original bytes and occupied destinations.
+
 ## Checks
 
 Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3, the release tools above and `timeout`; `kind` and

@@ -113,6 +113,14 @@ class ReleaseContentTest(unittest.TestCase):
         with tarfile.open(one) as archive:
             self.assertEqual(archive.extractfile("chart/Chart.yaml").read(), b"version: 0.1.0\n")
 
+    def test_release_version_must_match_the_source_chart_before_building(self):
+        output = self.root / "wrong-version"
+        script = Path(__file__).with_name("build-runtime-release.sh")
+        result = subprocess.run([str(script), "0.2.0", str(output)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must match the source chart", result.stderr)
+        self.assertFalse(output.exists())
+
     def test_symlink_notice_is_refused(self):
         path = self.context / "licenses" / release.REQUIRED_NOTICES[0]
         path.unlink()

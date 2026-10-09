@@ -1,0 +1,164 @@
+name: Runtime release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Canonical version without v (optionally -rc.N)
+        required: true
+        type: string
+      source_sha:
+        description: Exact signed source commit, equal to the dispatched main SHA
+        required: true
+        type: string
+      tag_object_sha:
+        description: Exact preapproved annotated signed vVERSION tag object
+        required: true
+        type: string
+      notes_sha256:
+        description: SHA-256 of the exact reviewed notes text
+        required: true
+        type: string
+      release_notes:
+        description: Exact reviewed notes text, including its final newline
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+  RELEASE_TAG_OBJECT_SHA: ${{ inputs.tag_object_sha }}
+  RELEASE_NOTES_SHA256: ${{ inputs.notes_sha256 }}
+  RELEASE_NOTES: ${{ inputs.release_notes }}
+  RUNTIME_PUBLIC_RELEASES_ENABLED: ${{ vars.RUNTIME_PUBLIC_RELEASES_ENABLED }}
+  RELEASE_FORBIDDEN_LITERAL: ${{ secrets.RUNTIME_FORBIDDEN_LITERAL }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Enforce dormancy before checkout or API access
+        run: |
+          test "$GITHUB_REPOSITORY" = stellwerk-labs/stellwerk-plugin-runtime
+          test "$GITHUB_REF" = refs/heads/main
+          test "$RUNTIME_PUBLIC_RELEASES_ENABLED" = true
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify public ownership, existing reviewers, signed identities and unused destinations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_policy.py preflight
+
+  qualify:
+    needs: preflight
+    uses: ./.github/workflows/ci.yaml
+    secrets:
+      RUNTIME_FORBIDDEN_LITERAL: ${{ secrets.RUNTIME_FORBIDDEN_LITERAL }}
+
+  build:
+    needs: [preflight, qualify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      checksums_sha256: ${{ steps.identify.outputs.checksums_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.2'
+          cache: false
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v4.3.0
+      - name: Install verified build tools
+        run: |
+          ./scripts/install-release-tools.sh "$RUNNER_TEMP/release-tools"
+          curl -fsSL --max-time 120 https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_linux_amd64.tar.gz -o "$RUNNER_TEMP/oras.tar.gz"
+          echo "f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454  $RUNNER_TEMP/oras.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$RUNNER_TEMP/release-tools" oras
+          echo "$RUNNER_TEMP/release-tools" >> "$GITHUB_PATH"
+      - name: Build once and record producer evidence
+        id: identify
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          ./scripts/build-runtime-release.sh "$RELEASE_VERSION" "$RUNNER_TEMP/runtime-release"
+          ./scripts/generate-runtime-sbom.sh "$RUNNER_TEMP/runtime-release"
+          python3 scripts/release_policy.py provenance "$RUNNER_TEMP/runtime-release/source-provenance.json"
+          python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"runtime-release","release-notes.md").write_text(os.environ["RELEASE_NOTES"])'
+          cd "$RUNNER_TEMP/runtime-release"
+          sha256sum ./*.tar.gz ./*.tgz ./*.spdx.json ./release.json ./source-provenance.json > "$RUNNER_TEMP/runtime-SHA256SUMS"
+          mv "$RUNNER_TEMP/runtime-SHA256SUMS" SHA256SUMS
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/runtime-SHA256SUMS"
+          mv "$RUNNER_TEMP/runtime-SHA256SUMS" BUILD-SHA256SUMS
+          echo "checksums_sha256=$(sha256sum BUILD-SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Preserve immutable build bytes before human review
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-release
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [preflight, qualify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The preflight must prove this environment already has required reviewers.
+    # Agents never submit this review. The job cannot reach publication first.
+    environment: runtime-release
+    concurrency:
+      group: runtime-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_CHECKSUMS_SHA256: ${{ needs.build.outputs.checksums_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable artifact identity from this exact producer run
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" | jq -e \
+            --arg digest "sha256:${ARTIFACT_DIGEST#sha256:}" --arg sha "$RELEASE_SOURCE_SHA" \
+            --argjson id "$ARTIFACT_ID" --argjson run "$GITHUB_RUN_ID" \
+            '.id == $id and .expired == false and .digest == $digest and .workflow_run.head_sha == $sha and .workflow_run.id == $run' >/dev/null
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/runtime-release
+          merge-multiple: true
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v4.3.0
+      - name: Install verified publication tools
+        run: |
+          ./scripts/install-release-tools.sh "$RUNNER_TEMP/release-tools"
+          curl -fsSL --max-time 120 https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_linux_amd64.tar.gz -o "$RUNNER_TEMP/oras.tar.gz"
+          echo "f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454  $RUNNER_TEMP/oras.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$RUNNER_TEMP/release-tools" oras
+          echo "$RUNNER_TEMP/release-tools" >> "$GITHUB_PATH"
+      - name: Publish, sign, verify exact subjects and compare uploaded bytes
+        run: ./scripts/publish-runtime-release.sh "$RUNNER_TEMP/runtime-release"

@@ -8,6 +8,8 @@ if ! [[ "$version" =~ ^0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]
   echo "expected a canonical pre-1.0 version (optionally -rc.N)" >&2
   exit 1
 fi
+chart_version="$(helm show chart "$root/charts/native-plugin-runtime" | awk '/^version: / {print $2}')"
+test "${version%%-rc.*}" = "$chart_version" || { echo "release version must match the source chart version" >&2; exit 1; }
 test ! -e "$output" || { echo "release destination already exists" >&2; exit 1; }
 mkdir -p "$output"
 output="$(cd "$output" && pwd)"

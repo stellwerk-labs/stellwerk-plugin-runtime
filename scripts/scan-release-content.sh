@@ -15,21 +15,26 @@ if ! python3 "$root/scripts/release_content.py" unpack "$directory" "$workspace/
 fi
 scan_tree() {
   local tree="$1"
+  shift
+  python3 "$root/scripts/release_content.py" scan "$tree" "$@"
   # Avoid logging finding values, even on scanner failure. No findings report is
-  # uploaded. The exact test-only allowlist is source-specific, not artifact-wide.
-  if ! (cd "$tree" && gitleaks dir --redact --no-banner --log-level error --config "$root/scripts/gitleaks.toml" . >/dev/null 2>&1); then
+  # uploaded. Shipping content cannot provide inline or fingerprint exemptions;
+  # the reviewed test-only allowlist comes solely from our pinned configuration.
+  if ! (cd "$tree" && gitleaks dir --redact --no-banner --log-level error \
+    --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null \
+    --config "$root/scripts/gitleaks.toml" . >/dev/null 2>&1); then
     echo "secret scan failed (finding or scanner error); inspect locally with redaction" >&2
     exit 1
   fi
   # Gitleaks intentionally skips binary files. Inspect their printable strings
   # and shipping paths without writing credentials into logs or reports.
   if ! python3 "$root/scripts/release_content.py" strings "$tree" |
-    gitleaks stdin --redact --no-banner --log-level error --config "$root/scripts/gitleaks.toml" >/dev/null 2>&1; then
+    (cd "$workspace" && gitleaks stdin --redact --no-banner --log-level error \
+      --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null \
+      --config "$root/scripts/gitleaks.toml" >/dev/null 2>&1); then
     echo "binary/path secret scan failed (finding or scanner error)" >&2
     exit 1
   fi
-  python3 "$root/scripts/release_content.py" scan "$tree" "${forbidden[@]}"
 }
-forbidden=("$@")
-scan_tree "$directory"
-scan_tree "$workspace/archives"
+scan_tree "$directory" "$@"
+scan_tree "$workspace/archives" "$@"

@@ -289,6 +289,61 @@ class ReleaseContentTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(token, result.stdout + result.stderr)
 
+    def test_shipping_content_cannot_allow_its_own_secret_inline(self):
+        scan = Path(__file__).with_name("scan-release-content.sh")
+        seed = self.root / "inline-allow"
+        seed.mkdir()
+        token = "ghp_" + "".join(random.Random(19).sample(string.ascii_letters + string.digits, 36))
+        line = ('github_token="' + token + '" # gitleaks:allow\n').encode()
+        for kind, content in (("text", line), ("binary", b"\x7fELF\x02\x01\0" + line + b"\0")):
+            with self.subTest(kind=kind):
+                (seed / "credential").write_bytes(content)
+                result = subprocess.run([str(scan), str(seed)], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_bash_scans_archived_binaries_without_forbidden_arguments(self):
+        scan = Path(__file__).with_name("scan-release-content.sh")
+        seed = self.root / "no-arguments"
+        seed.mkdir()
+        archive = seed / "runtime.tgz"
+        token = "ghp_" + "".join(random.Random(23).sample(string.ascii_letters + string.digits, 36))
+        for contains_secret in (False, True):
+            with self.subTest(contains_secret=contains_secret):
+                content = b"\x7fELF\x02\x01\0public-runtime\0"
+                if contains_secret:
+                    content += ("github_token=" + token).encode() + b"\0"
+                archive.write_bytes(gzip.compress(release.tar_bytes({"runtime": (content, 0o755)})))
+                result = subprocess.run(["/bin/bash", str(scan), str(seed)],
+                                        capture_output=True, text=True, timeout=30)
+                if contains_secret:
+                    self.assertNotEqual(result.returncode, 0)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("unbound variable", result.stdout + result.stderr)
+                self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_shipping_content_cannot_supply_ignored_fingerprints(self):
+        scan = Path(__file__).with_name("scan-release-content.sh")
+        seed = self.root / "fingerprint-allow"
+        seed.mkdir()
+        token = "ghp_" + "".join(random.Random(19).sample(string.ascii_letters + string.digits, 36))
+        (seed / "credential").write_text("github_token=" + token)
+        detection = subprocess.run(
+            ["gitleaks", "dir", "--redact", "--no-banner", "--log-level", "error",
+             "--ignore-gitleaks-allow", "--gitleaks-ignore-path", "/dev/null",
+             "--config", str(Path(__file__).with_name("gitleaks.toml")),
+             "--report-format", "json", "--report-path", "-", "."],
+            cwd=seed, capture_output=True, text=True, timeout=20)
+        self.assertEqual(detection.returncode, 1)
+        findings = json.loads(detection.stdout)
+        self.assertTrue(findings)
+        (seed / ".gitleaksignore").write_text(
+            "\n".join(finding["Fingerprint"] for finding in findings) + "\n")
+        result = subprocess.run([str(scan), str(seed)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(token, result.stdout + result.stderr)
+
     def test_secret_removed_by_whiteout_is_still_scanned(self):
         token = "ghp_" + "".join(random.Random(17).sample(string.ascii_letters + string.digits, 36))
         layout, digest = self.image(deleted_secret="github_token=" + token)

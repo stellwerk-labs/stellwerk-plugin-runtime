@@ -170,6 +170,8 @@ def scan(directory, forbidden=()):
     ] + [re.escape(value.encode()) for value in forbidden if value]
     text_patterns = [rb"\bWX[0-9]+\b", rb"\b(?:S1\.[0-9]+|PM[0-9]{2}|MO[0-9]{2}|[QCD][0-9]{2})\b"]
     for path in directory.rglob("*"):
+        if path.name == ".gitleaksignore":
+            raise ValueError("shipping content cannot supply scanner exemptions")
         if path.is_symlink():
             raise ValueError("refusing symlinked scan content")
         if any(re.search(pattern, path.relative_to(directory).as_posix().encode())

@@ -165,6 +165,11 @@ mkdir -m 0777 "$workspace/package" "$workspace/tampered" "$workspace/wrong-key"
 mkdir -m 0755 "$workspace/trust" "$workspace/trust-sigstore" "$workspace/trust-wrong" "$workspace/signature"
 mkdir -m 0777 "$workspace/verify" "$workspace/verify-refused"
 mkdir -m 0777 "$workspace/attestations" "$workspace/unsigned" "$workspace/foreign-subject" "$workspace/tampered-provenance"
+# Keep bind-mount directories owned by the host. ORAS writes as the chart's
+# UID 65532; directories it creates with mode 0755 cannot be cleaned up by
+# a different host UID on native Linux (Docker Desktop masks this).
+mkdir -m 0777 "$workspace/package/bin" "$workspace/package/bin/linux" \
+  "$workspace/package/bin/linux/amd64" "$workspace/package/bin/linux/arm64"
 # Operator trust bootstraps: the approved key under managed-key-no-tlog, the
 # same key under the default sigstore policy, and a foreign key.
 trust_bootstrap "$workspace/trust/publishers.json" managed-key-no-tlog "$workspace/approved/cosign.pub" "$plugin_id"
@@ -193,6 +198,8 @@ publisher_gate() {
 # fetch_attestation ATTESTATIONS NAME REFERRER is the chart's attestation
 # fetch: ORAS pulls a referrer from the package repository by digest.
 fetch_attestation() {
+  mkdir -p "$workspace/$1/$2"
+  chmod 0777 "$workspace/$1/$2"
   timeout -k 5s 45s docker run "${container_base[@]}" --network "container:$registry" \
     --mount "type=bind,src=$workspace/$1,dst=/attestations" "$oras_image" \
     pull --no-tty --output="/attestations/$2" --plain-http "localhost:5000/native-probe@$3" >/dev/null
@@ -405,6 +412,13 @@ for case_name in tampered wrong-key; do
   fi
   if [[ "$output" != *"validated runtime state unavailable"* ]]; then
     echo "$case_name launcher did not fail at the missing validation receipt" >&2
+    exit 1
+  fi
+done
+
+for directory in package attestations unsigned foreign-subject tampered-provenance; do
+  if [ -n "$(find "$workspace/$directory" -type d ! -user "$(id -u)" -print -quit)" ]; then
+    echo "container created a directory the host cannot clean up" >&2
     exit 1
   fi
 done

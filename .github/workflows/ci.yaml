@@ -66,6 +66,22 @@ jobs:
         with:
           version: v4.3.0
 
+      - name: Install verified release content tools
+        run: |
+          ./scripts/install-release-tools.sh "$RUNNER_TEMP/release-tools"
+          echo "$RUNNER_TEMP/release-tools" >> "$GITHUB_PATH"
+
+      - name: Check release content contracts
+        run: python3 -m unittest discover -s scripts -p 'release_content_test.py' -v
+
+      - name: Scan committed source with redaction
+        env:
+          RELEASE_FORBIDDEN_LITERAL: ${{ github.event.repository.private && github.repository_owner || '' }}
+        run: |
+          mkdir "$RUNNER_TEMP/scan-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/scan-source"
+          ./scripts/scan-release-content.sh "$RUNNER_TEMP/scan-source" "$RELEASE_FORBIDDEN_LITERAL"
+
       # ORAS matches the pinned ORAS image, kind the pinned kindest/node image
       # (scripts/images.sh) and kubectl that node's Kubernetes version.
       - name: Install pinned ORAS, kind and kubectl
@@ -110,6 +126,13 @@ jobs:
       # container run with a read-only root and a noexec /tmp.
       - name: Run the runtime tests in a sealed Linux container
         run: ./scripts/linux-test.sh
+
+      - name: Build, inspect and scan release artifacts and generate SPDX SBOMs
+        env:
+          RELEASE_FORBIDDEN_LITERAL: ${{ github.event.repository.private && github.repository_owner || '' }}
+        run: |
+          ./scripts/build-runtime-release.sh 0.1.0 "$RUNNER_TEMP/runtime-release"
+          ./scripts/generate-runtime-sbom.sh "$RUNNER_TEMP/runtime-release"
 
       - name: Run the runtime and UI under Docker Compose
         run: ./scripts/compose-test.sh

@@ -38,6 +38,7 @@ mkdir -p "$workspace/context"
 CGO_ENABLED=0 GOOS=linux GOARCH="${platform#linux/}" GOWORK=off \
   go -C "$root" build -trimpath -o "$workspace/context/runtime-linux-${platform#linux/}" ./runtime
 cp "$root/Dockerfile.runtime" "$workspace/context/Dockerfile.runtime"
+"$root/scripts/collect-licenses.sh" "$workspace/context/licenses"
 timeout -k 5s 120s docker build --quiet --network=none --platform "$platform" \
   --file "$workspace/context/Dockerfile.runtime" --tag "$runtime_image" "$workspace/context" >/dev/null
 

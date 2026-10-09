@@ -3,4 +3,4 @@ name: native-plugin-runtime
 description: Generic isolated runtime for a pre-verified Stellwerk native plugin package
 type: application
 version: 0.1.0
-appVersion: "1"
+appVersion: "0.1.0"

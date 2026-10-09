@@ -137,6 +137,7 @@ push_test_images() {
   CGO_ENABLED=0 GOOS=linux GOARCH="$go_arch" GOWORK=off \
     go -C "$root" build -trimpath -o "$workspace/runtime-context/runtime-linux-$go_arch" ./runtime
   cp "$root/Dockerfile.runtime" "$workspace/runtime-context/Dockerfile.runtime"
+  "$root/scripts/collect-licenses.sh" "$workspace/runtime-context/licenses"
   quiet docker build --network=none --build-arg "TARGETARCH=$go_arch" \
     --file "$workspace/runtime-context/Dockerfile.runtime" --tag "$runtime_tag" "$workspace/runtime-context"
   docker push "$runtime_tag" >/dev/null

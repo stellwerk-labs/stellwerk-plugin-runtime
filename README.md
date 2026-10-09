@@ -465,12 +465,13 @@ network whose only peer is the registry.
 
 ## Building the runtime image
 
-The image is `FROM scratch` with one static binary and runs as UID 65532.
+The image is `FROM scratch` with one static binary, license and patent notices
+under `/licenses`, and runs as UID 65532. Builds use Go 1.26.2.
 
 ```sh
-for arch in amd64 arm64; do
-  CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "dist/runtime-linux-$arch" ./runtime
-done
+./scripts/install-release-tools.sh /tmp/runtime-release-tools
+export PATH="/tmp/runtime-release-tools:$PATH"
+./scripts/build-runtime-files.sh dist
 docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.runtime dist
 ```
 
@@ -481,9 +482,19 @@ Go toolchain always give the same digest; `oras cp` publishes it, and the
 offline bundle takes it from the layout. `check.sh` keeps it in line with
 `Dockerfile.runtime`.
 
+`scripts/build-runtime-release.sh VERSION OUTPUT_DIRECTORY` builds that index,
+one archive per architecture containing the executable and the same notices,
+the Helm chart, and exact source/image metadata. It checks the exported image
+filesystems with pinned Gitleaks (redacted) and a private-reference scan.
+`scripts/generate-runtime-sbom.sh OUTPUT_DIRECTORY` uses digest-pinned Syft
+without network access to produce SPDX JSON for each image and archive.
+Neither command publishes artifacts. Source scanning permits only the exact
+literal response token in `TestTokenExchangeRejectsAnswersOutsideTheContract`,
+scoped to its test file in `scripts/gitleaks.toml`.
+
 ## Checks
 
-Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3 and `timeout`; `kind` and
+Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3, the release tools above and `timeout`; `kind` and
 `kubectl` for the cluster test.
 
 ```sh

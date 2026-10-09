@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Literal noncredential response in TestTokenExchangeRejectsAnswersOutsideTheContract"
+condition = "AND"
+paths = ['''^runtime/coretoken_test\.go$''']
+regexTarget = "secret"
+regexes = ['''^PWT-abc_DEF-123$''']

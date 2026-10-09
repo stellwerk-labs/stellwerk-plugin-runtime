@@ -1,5 +1,6 @@
 FROM scratch
 ARG TARGETARCH
 COPY runtime-linux-${TARGETARCH} /runtime
+COPY licenses /licenses
 USER 65532:65532
 ENTRYPOINT ["/runtime"]

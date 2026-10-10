@@ -96,6 +96,12 @@ package:
   registryConfigSecret:
     name: ""
     key: .dockerconfigjson
+  # Optional public TLS CA for the registry/mirror, not a client key or the
+  # publisher/Core/database trust bundle. ORAS fetch init containers only.
+  # Cannot be combined with plainHTTP. Updates apply on the next Pod start.
+  registryCASecret:
+    name: ""
+    key: ca.crt
 
 trust:
   # Required for an enabled installation, there is no default:

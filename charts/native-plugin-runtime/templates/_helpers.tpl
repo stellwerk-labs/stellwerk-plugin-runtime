@@ -64,9 +64,12 @@ pulled from it by their own digests. */}}
 {{- end -}}
 
 {{/* Every replica fetches and verifies its own package copy into an emptyDir.
-Registry credentials, ORAS and trust material reach only these init
+Registry credentials, registry CA, ORAS and trust material reach only these init
 containers, never the plugin, UI or token containers. */}}
 {{- define "native-plugin-runtime.fetchInitContainers" -}}
+{{- if and .Values.package.plainHTTP .Values.package.registryCASecret.name }}
+{{- fail "package.registryCASecret cannot be combined with package.plainHTTP" }}
+{{- end }}
 {{- $managedKey := eq .Values.trust.mode "managed-key-no-tlog" }}
 {{- $attestations := .Values.package.attestations }}
 {{- $predicateTypes := dict "sbom" "https://spdx.dev/Document" "provenance" "https://stellwerk.dev/attestation/source-provenance/v1" }}
@@ -77,6 +80,10 @@ containers, never the plugin, UI or token containers. */}}
     - manifest
     - fetch
     - --output=/package/oci-manifest.json
+    {{- if .Values.package.registryCASecret.name }}
+    - --ca-file=/registry/ca.crt
+    - --plain-http=false
+    {{- end }}
     {{- if .Values.package.plainHTTP }}
     - --plain-http
     {{- end }}
@@ -98,6 +105,12 @@ containers, never the plugin, UI or token containers. */}}
     - name: registry-config
       mountPath: /registry/config.json
       subPath: config.json
+      readOnly: true
+    {{- end }}
+    {{- if .Values.package.registryCASecret.name }}
+    - name: registry-ca
+      mountPath: /registry/ca.crt
+      subPath: ca.crt
       readOnly: true
     {{- end }}
     - name: temporary
@@ -133,6 +146,10 @@ containers, never the plugin, UI or token containers. */}}
     - pull
     - --no-tty
     - --output=/attestations/{{ $name }}
+    {{- if $.Values.package.registryCASecret.name }}
+    - --ca-file=/registry/ca.crt
+    - --plain-http=false
+    {{- end }}
     {{- if $.Values.package.plainHTTP }}
     - --plain-http
     {{- end }}
@@ -154,6 +171,12 @@ containers, never the plugin, UI or token containers. */}}
     - name: registry-config
       mountPath: /registry/config.json
       subPath: config.json
+      readOnly: true
+    {{- end }}
+    {{- if $.Values.package.registryCASecret.name }}
+    - name: registry-ca
+      mountPath: /registry/ca.crt
+      subPath: ca.crt
       readOnly: true
     {{- end }}
     - name: temporary
@@ -278,6 +301,10 @@ containers, never the plugin, UI or token containers. */}}
     - pull
     - --no-tty
     - --output=/package
+    {{- if .Values.package.registryCASecret.name }}
+    - --ca-file=/registry/ca.crt
+    - --plain-http=false
+    {{- end }}
     {{- if .Values.package.plainHTTP }}
     - --plain-http
     {{- end }}
@@ -299,6 +326,12 @@ containers, never the plugin, UI or token containers. */}}
     - name: registry-config
       mountPath: /registry/config.json
       subPath: config.json
+      readOnly: true
+    {{- end }}
+    {{- if .Values.package.registryCASecret.name }}
+    - name: registry-ca
+      mountPath: /registry/ca.crt
+      subPath: ca.crt
       readOnly: true
     {{- end }}
     - name: temporary
@@ -323,8 +356,8 @@ containers, never the plugin, UI or token containers. */}}
 {{- end -}}
 
 {{/* The operator's Secrets (trust bootstrap, signature bundle, registry
-config) are mounted file by file with subPath. A Secret volume exposes each
-key as a symlink into its ..data directory, and the runtime opens its inputs
+config and registry CA) are mounted file by file with subPath. A Secret volume
+exposes each key as a symlink into its ..data directory, and the runtime opens its inputs
 with O_NOFOLLOW; a subPath mount is the plain file itself. subPath mounts do
 not follow later Secret updates, which costs nothing here: the init chain
 reads them once at Pod start, so a trust change applies on the next Pod
@@ -363,6 +396,15 @@ start (rollout restart). */}}
     items:
       - key: {{ .Values.package.registryConfigSecret.key }}
         path: config.json
+{{- end }}
+{{- if .Values.package.registryCASecret.name }}
+- name: registry-ca
+  secret:
+    secretName: {{ .Values.package.registryCASecret.name }}
+    defaultMode: 0440
+    items:
+      - key: {{ .Values.package.registryCASecret.key | quote }}
+        path: ca.crt
 {{- end }}
 {{- end -}}
 

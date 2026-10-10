@@ -22,6 +22,7 @@ fi
 
 helm lint charts/native-plugin-runtime
 helm template native-probe charts/native-plugin-runtime >/dev/null
+python3 "$root/scripts/registry-ca-test.py"
 
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/native-plugin-check.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT

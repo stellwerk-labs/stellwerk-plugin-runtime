@@ -247,6 +247,19 @@ bootstrap only the publisher gate, and the signature bundle and attestations
 only the gate and Cosign; the plugin, UI and token containers mount none of
 them and see the package read-only.
 
+`package.registryConfigSecret` optionally supplies registry credentials.
+For a TLS mirror with a private CA, set `package.registryCASecret.name` to a
+public-CA-only Secret and optionally `package.registryCASecret.key` (default
+`ca.crt`). Every ORAS package and attestation fetch uses `--ca-file` with the
+selected key mounted read-only at `/registry/ca.crt`, in both the runtime and
+migration fetch chains. Fetches explicitly enforce HTTPS, including for
+`localhost` (where ORAS otherwise defaults to HTTP). No verifier, plugin, UI,
+token or migration executor container mounts it. This is registry server trust,
+not publisher, Core or database trust, and does not configure kubelet image pulls. Do not place a
+client private key in this Secret. `package.plainHTTP=true` and a configured
+registry CA are contradictory and rejected. Like the registry credentials,
+CA updates apply at the next Pod start (rollout restart), not to running Pods.
+
 Registry egress is limited to the customer's mirror endpoints listed in
 `networkPolicy.registryMirrors`: single addresses (`/32` or `/128`) or exact
 in-cluster peers (namespace and Pod selector), each with a port. Ranges,
@@ -522,6 +535,7 @@ Prerequisites: Go, Docker, Helm, ORAS, jq, Python 3, the release tools above and
 
 ```sh
 ./scripts/check.sh                  # gofmt, go test -race, go vet, Linux execution tests, chart contract, package build
+python3 scripts/registry-ca-test.py  # Helm isolation/schema and real ORAS loopback TLS fetches (ORAS 1.3.4)
 ./scripts/compose-test.sh           # run and serve-ui as non-root PID 1, filtered environment, state, CSP, exit 0 on SIGTERM
 ./scripts/package-init-chain-test.sh  # sign, attest, transfer, publish locally, run the chart init chain, negatives
 ./scripts/offline-bundle-test.sh    # build a bundle, import it without egress, digests and referrers kept, tampered bundles refused

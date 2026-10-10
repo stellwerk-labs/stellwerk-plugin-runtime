@@ -1,0 +1,10 @@
+# Learnings
+
+- ORAS 1.3.4 defaults a `localhost` reference to plain HTTP, even with a CA
+  file. Explicit `--plain-http=false` enforces HTTPS. A real loopback registry
+  fixture caught this; an argument-only test would not.
+- A registry CA is server transport trust only. It neither establishes package
+  publisher trust nor configures the kubelet's image-pull trust.
+
+References: [ORAS remote options](https://github.com/oras-project/oras/blob/v1.3.4/cmd/oras/internal/option/remote.go),
+[Secret key validation](https://github.com/kubernetes/apimachinery/blob/v0.35.0/pkg/util/validation/validation.go).

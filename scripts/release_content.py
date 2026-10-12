@@ -77,6 +77,18 @@ def chart(source, output):
             compressed.write(tar_bytes(files))
 
 
+def strict_json(data):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate OCI JSON key")
+            result[key] = value
+        return result
+
+    return json.loads(data, object_pairs_hook=unique)
+
+
 def blob(layout, descriptor):
     digest, size = descriptor.get("digest", ""), descriptor.get("size")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or type(size) is not int or size < 0:
@@ -94,25 +106,43 @@ def export(layout, digest, output):
     layout, output = Path(layout), Path(output)
     if output.exists() or layout.is_symlink():
         raise ValueError("filesystem output must be new and layout must not be a symlink")
-    if json.loads((layout / "oci-layout").read_text()) != {"imageLayoutVersion": "1.0.0"}:
+    marker_bytes = (layout / "oci-layout").read_bytes()
+    if strict_json(marker_bytes) != {"imageLayoutVersion": "1.0.0"}:
         raise ValueError("unsupported OCI layout")
-    index = json.loads((layout / "index.json").read_text())
+    index_bytes = (layout / "index.json").read_bytes()
+    index = strict_json(index_bytes)
     selected = [d for d in index["manifests"] if d["digest"] == digest]
     if len(selected) != 1:
         raise ValueError("OCI index must select the requested digest exactly once")
-    image_index = json.loads(blob(layout, selected[0]))
+    image_index_bytes = blob(layout, selected[0])
+    image_index = strict_json(image_index_bytes)
     manifests = image_index["manifests"]
     if image_index.get("schemaVersion") != 2 or len(manifests) != 2:
         raise ValueError("runtime index must hold exactly two platforms")
     platforms = {(d["platform"]["os"], d["platform"]["architecture"]) for d in manifests}
     if platforms != {("linux", "amd64"), ("linux", "arm64")}:
         raise ValueError("runtime index has the wrong platform set")
+    metadata = output / "metadata"
+    metadata.mkdir(parents=True)
+    # Retain original bytes as well as decoded values for strict scanning.
+    (metadata / "oci-layout.json").write_bytes(marker_bytes)
+    (metadata / "layout-index.json").write_bytes(index_bytes)
+    (metadata / "index.json").write_bytes(image_index_bytes)
+    (metadata / "layout-index-decoded.json").write_text(json.dumps(index, sort_keys=True))
+    (metadata / "index-decoded.json").write_text(json.dumps(image_index, sort_keys=True))
     for descriptor in manifests:
         arch = descriptor["platform"]["architecture"]
-        manifest = json.loads(blob(layout, descriptor))
+        manifest_bytes = blob(layout, descriptor)
+        manifest = strict_json(manifest_bytes)
         if manifest.get("schemaVersion") != 2 or not manifest["layers"]:
             raise ValueError("runtime manifest must hold layers")
-        config = json.loads(blob(layout, manifest["config"]))
+        config_bytes = blob(layout, manifest["config"])
+        config = strict_json(config_bytes)
+        identity = descriptor["digest"][7:]
+        (metadata / (identity + "-manifest.json")).write_bytes(manifest_bytes)
+        (metadata / (manifest["config"]["digest"][7:] + "-config.json")).write_bytes(config_bytes)
+        (metadata / (identity + ".json")).write_text(json.dumps(
+            {"descriptor": descriptor, "manifest": manifest, "config": config}, sort_keys=True))
         if (config.get("os"), config.get("architecture"), config.get("config")) != (
             "linux", arch, {"User": "65532:65532", "Entrypoint": ["/runtime"]}
         ):

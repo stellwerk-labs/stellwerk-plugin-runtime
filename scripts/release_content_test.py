@@ -35,15 +35,22 @@ class ReleaseContentTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("notice for " + name)
 
-    def image(self, malicious=None, deleted_secret=None):
-        layout = self.root / "oci"
+    def image(self, malicious=None, deleted_secret=None, json_transform=None, directory=None):
+        layout = directory or self.root / "oci"
         blobs = layout / "blobs" / "sha256"
         blobs.mkdir(parents=True)
-        (layout / "oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}')
+        def metadata(kind, data):
+            return json_transform(kind, data) if json_transform else data
+        (layout / "oci-layout").write_bytes(metadata("marker", b'{"imageLayoutVersion":"1.0.0"}'))
 
         def blob(data, media_type):
             if not isinstance(data, bytes):
                 data = json.dumps(data, sort_keys=True).encode()
+            kinds = {"application/vnd.oci.image.config.v1+json": "config",
+                     "application/vnd.oci.image.manifest.v1+json": "manifest",
+                     "application/vnd.oci.image.index.v1+json": "index"}
+            if media_type in kinds:
+                data = metadata(kinds[media_type], data)
             digest = hashlib.sha256(data).hexdigest()
             (blobs / digest).write_bytes(data)
             return {"digest": "sha256:" + digest, "size": len(data), "mediaType": media_type}
@@ -76,8 +83,72 @@ class ReleaseContentTest(unittest.TestCase):
             manifest["platform"] = {"os": "linux", "architecture": arch}
             manifests.append(manifest)
         index = blob({"schemaVersion": 2, "manifests": manifests}, "application/vnd.oci.image.index.v1+json")
-        (layout / "index.json").write_text(json.dumps({"schemaVersion": 2, "manifests": [index]}))
+        (layout / "index.json").write_bytes(metadata("wrapper", json.dumps({"schemaVersion": 2, "manifests": [index]}).encode()))
         return layout, index["digest"]
+
+    def test_original_metadata_bytes_and_decoded_references_are_scanned(self):
+        for kind in ("wrapper", "index", "manifest", "config"):
+            for value in (b"private-owner-fixture", b"private-owner-fixtur\\u0065"):
+                with self.subTest(kind=kind, escaped=b"\\u" in value), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    originals = []
+                    def transform(stage, data):
+                        if stage == kind:
+                            data = b'{ "audit":"' + value + b'",\n' + data[1:]
+                            originals.append(data)
+                        return data
+                    layout, digest = self.image(json_transform=transform, directory=root / "image")
+                    release.export(layout, digest, root / "output")
+                    retained = [path.read_bytes() for path in (root / "output/metadata").iterdir()]
+                    self.assertTrue(originals)
+                    for raw in originals:
+                        self.assertIn(raw, retained)
+                    with self.assertRaisesRegex(ValueError, "prohibited content"):
+                        release.scan(root / "output", ["private-owner-fixture"])
+
+    def artifact_check(self, layout, digest, output):
+        result = subprocess.run(["python3", str(Path(__file__).with_name("release_content.py")),
+                                 "export", str(layout), digest, str(output)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            return result
+        return subprocess.run(["bash", str(Path(__file__).with_name("scan-release-content.sh")), str(output)],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_duplicate_metadata_keys_fail_at_both_inspection_boundaries(self):
+        for kind in ("marker", "wrapper", "index", "manifest", "config"):
+            for prefix in (b'{"audit":"private-owner-fixture","audit":"public",',
+                           b'{"nested":{"audit":"private-owner-fixture","aud\\u0069t":"public"},'):
+                with self.subTest(kind=kind, nested=b"nested" in prefix), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    def transform(stage, data):
+                        return prefix + data[1:] if stage == kind else data
+                    layout, digest = self.image(json_transform=transform, directory=root / "image")
+                    with self.assertRaisesRegex(ValueError, "duplicate OCI JSON key"):
+                        release.export(layout, digest, root / "direct")
+                    for boundary in ("producer", "publisher"):
+                        result = self.artifact_check(layout, digest, root / boundary)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("duplicate OCI JSON key", result.stderr)
+                        self.assertNotIn("private-owner-fixture", result.stdout + result.stderr)
+
+    def test_publication_reinspection_rejects_digest_valid_metadata_tamper(self):
+        token = "ghp_" + "".join(random.Random(61).sample(string.ascii_letters + string.digits, 36))
+        for kind in ("index", "manifest", "config"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                layout, digest = self.image(directory=root / "image")
+                for boundary in ("producer", "publisher-clean"):
+                    result = self.artifact_check(layout, digest, root / boundary)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                shutil.rmtree(layout)
+                def transform(stage, data):
+                    return b'{"audit":"' + token.encode() + b' # gitleaks:allow",' + data[1:] if stage == kind else data
+                layout, digest = self.image(json_transform=transform, directory=root / "image")
+                for boundary in ("producer-tampered", "publisher-tampered"):
+                    result = self.artifact_check(layout, digest, root / boundary)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(token, result.stdout + result.stderr)
 
     def test_archives_are_identical_after_metadata_changes(self):
         first, second = self.root / "first.gz", self.root / "second.gz"

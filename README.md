@@ -231,6 +231,29 @@ the state `emptyDir` is bounded by `stateVolume.sizeLimit` and service links
 are disabled. `pluginSecretFiles` mounts operator-owned Secrets into the
 plugin container only, never into the fetch init containers.
 
+### Hostname overrides
+
+`hostAliases` defaults to `[]`. When configured, the chart passes the same
+Kubernetes Pod-level hostname overrides to the runtime Deployment and migration
+Job, including their init containers:
+
+```yaml
+hostAliases:
+  - ip: "192.0.2.10"
+    hostnames: ["core.example.com"]
+```
+
+Use a literal IPv4 or IPv6 address and lowercase DNS subdomain hostnames, not
+URLs. This changes hostname resolution only. Keep the original HTTPS URL so
+TLS certificate hostname verification, SNI and the HTTP Host remain intact.
+NetworkPolicy still needs to allow the selected destination. The operator must
+verify the address belongs to the intended endpoint and update the values if
+it changes; the chart does not discover or track Service ClusterIPs. Overrides
+are Pod-wide and apply on Pod creation, not to already-running Pods. Kubernetes
+still validates the rendered Pod specs during admission.
+
+See [Kubernetes HostAliases](https://kubernetes.io/docs/tasks/network/customize-hosts-file-for-pods/).
+
 ### Package fetch
 
 Every replica fetches and verifies its own copy of the package in init

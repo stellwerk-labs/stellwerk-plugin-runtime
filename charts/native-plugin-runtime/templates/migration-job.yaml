@@ -34,6 +34,10 @@ spec:
       serviceAccountName: {{ include "native-plugin-runtime.migrationServiceAccountName" . }}
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       restartPolicy: Never
       securityContext:
         runAsNonRoot: true

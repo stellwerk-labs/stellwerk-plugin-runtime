@@ -288,6 +288,13 @@ networkPolicy:
   additionalIngress: []
   additionalEgress: []
 
+# Optional Pod-wide hostname overrides, shared by runtime and migration Pods.
+# Keep the original HTTPS URL/hostname and certificate verification. This does
+# not grant network access or discover/track a Service's changing ClusterIP.
+hostAliases: []
+#  - ip: "192.0.2.10"
+#    hostnames: ["core.example.com"]
+
 nodeSelector: {}
 tolerations: []
 # Replaces the default preferred anti-affinity of several replicas.

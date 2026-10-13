@@ -75,6 +75,10 @@ spec:
       serviceAccountName: {{ include "native-plugin-runtime.serviceAccountName" . }}
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true

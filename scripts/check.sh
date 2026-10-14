@@ -22,6 +22,8 @@ fi
 
 helm lint charts/native-plugin-runtime
 helm template native-probe charts/native-plugin-runtime >/dev/null
+python3 "$root/scripts/chart-kubernetes-version-test.py"
+python3 "$root/scripts/chart-config-test.py"
 python3 "$root/scripts/chart-host-aliases-test.py"
 python3 "$root/scripts/registry-ca-test.py"
 
@@ -735,7 +737,7 @@ fi
 helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
   --set preStopDelaySeconds=10 --set terminationGracePeriodSeconds=15 >"$fixture/prestop-custom.yaml"
 helm template native-ui charts/native-plugin-runtime "${workload_args[@]}" \
-  --set preStopDelaySeconds=0 --kube-version 1.29.0 >"$fixture/prestop-off.yaml"
+  --set preStopDelaySeconds=0 >"$fixture/prestop-off.yaml"
 python3 - "$fixture" <<'PY'
 import re
 import sys

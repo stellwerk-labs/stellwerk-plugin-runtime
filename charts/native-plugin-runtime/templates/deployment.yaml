@@ -1,3 +1,6 @@
+{{- if semverCompare "<1.30.0" .Capabilities.KubeVersion.Version }}
+{{- fail "native-plugin-runtime requires Kubernetes 1.30 or newer" }}
+{{- end }}
 {{- if .Values.enabled }}
 {{- $replicas := int .Values.replicaCount }}
 {{- if and (gt $replicas 1) .Values.persistence.enabled }}
@@ -13,15 +16,9 @@
 {{- if not .Values.serviceAccount.create }}
 {{- fail "workloadIdentity requires the chart's own ServiceAccount (serviceAccount.create=true): an IAM workload binding names exactly one ServiceAccount per installation" }}
 {{- end }}
-{{- if semverCompare "<1.29.0-0" .Capabilities.KubeVersion.Version }}
-{{- fail "workloadIdentity runs the token exchange as a native sidecar and requires Kubernetes 1.29 or newer" }}
-{{- end }}
 {{- end }}
 {{- if lt (int .Values.terminationGracePeriodSeconds) (add (int .Values.preStopDelaySeconds) 5) }}
 {{- fail "terminationGracePeriodSeconds must be at least preStopDelaySeconds + 5: the containers receive SIGTERM only after the delay and then drain" }}
-{{- end }}
-{{- if and (gt (int .Values.preStopDelaySeconds) 0) (semverCompare "<1.30.0-0" .Capabilities.KubeVersion.Version) }}
-{{- fail "preStopDelaySeconds uses the preStop sleep action, which requires Kubernetes 1.30 or newer; set it to 0 on older clusters" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment

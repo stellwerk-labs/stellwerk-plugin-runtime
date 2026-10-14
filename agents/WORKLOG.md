@@ -1,5 +1,26 @@
 # Work log
 
+## Native chart platform minimum and offline metadata
+
+Add the Kubernetes 1.30 chart metadata constraint and an unconditional template
+guard, retaining preStop-delay disabling only as an optional behavior on supported
+clusters. Update the operator README and values. New real Helm tests prove 1.29
+refusal with delay zero, independent template refusal without metadata, and
+identical 1.30/1.35 workload rendering. The supported 1.35 render also matches
+the predecessor chart byte-for-byte.
+
+The new field exposed an inaccurate offline-bundle scalar conversion. Replace
+that flat conversion with a standard-library helper that decodes Helm's quoted
+strings and rejects malformed, duplicate, nested, tag and alias forms. Actual
+packaged Helm metadata is compared with the exact OCI config. Keep Python in
+the bundle producer's prerequisite checks. No runtime application or image
+input changed. See Decisions and Learnings.
+
+Root independently passed chart-config3, Kubernetes-boundary3, host-alias4 and
+registry-CA7 tests, including actual pinned ORAS loopback TLS; Helm lint,
+ShellCheck, Bash and whitespace checks passed. Full source/consumer qualification
+is separate and not claimed from these targeted passes.
+
 ## Registry mirror TLS CA
 
 Added chart values/schema, init-only mounts and TLS flags, operator documentation,

@@ -141,7 +141,7 @@ serviceAccount:
 # presents a projected ServiceAccount token to IAM through the Core gateway
 # before the plugin starts and keeps the issued short-lived Core token fresh
 # in a memory-backed file named by STELLWERK_CORE_TOKEN_FILE. Only the
-# sidecar mounts the Kubernetes token. Needs Kubernetes 1.29+, the chart's own
+# sidecar mounts the Kubernetes token. Needs Kubernetes 1.30+, the chart's own
 # ServiceAccount and an IAM workload binding for exactly that ServiceAccount.
 workloadIdentity:
   enabled: false
@@ -218,7 +218,8 @@ probes:
 # shuts down, but kube-proxy and the Gateways stop sending to it only once the
 # EndpointSlice update has reached them, usually within a second or two. The
 # plugin and UI containers therefore keep serving for preStopDelaySeconds (a
-# preStop sleep, Kubernetes 1.30 or newer; 0 disables it) before they receive
+# preStop sleep; 0 disables the delay but not the chart's Kubernetes 1.30 minimum)
+# before they receive
 # SIGTERM, so no request meets a closed listener during a rolling upgrade.
 # 5 s covers that propagation with margin and adds 5 s per replica to a rollout.
 preStopDelaySeconds: 5

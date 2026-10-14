@@ -321,7 +321,8 @@ preStop sleep on the plugin and UI containers) before it receives `SIGTERM`:
 the Pod leaves the Service endpoints at once, but kube-proxy and the Gateways
 learn that only when the EndpointSlice update reaches them, and a listener
 closed earlier would fail the requests still routed to it. Kubernetes 1.30 or
-newer; `0` disables the delay. `terminationGracePeriodSeconds` (default 15)
+newer; `0` disables the delay but does not lower the chart's Kubernetes
+minimum. `terminationGracePeriodSeconds` (default 15)
 must be at least the delay plus 5 s, so the containers still drain after it.
 
 ### Migration phase
@@ -383,7 +384,7 @@ Gateway and, with `ui.gateway.issuerName`, a cert-manager Certificate.
 `workloadIdentity.enabled=true` gives the plugin a short-lived Core credential
 instead of a long-lived service-user token (`v1alpha`, see
 [Plugin workload identity](https://docs.stellwerk.dev/platform-orchestrator/docs/architecture/plugins/plugin-workload-identity/)).
-It needs Kubernetes 1.29 or newer, the chart's own ServiceAccount
+It needs Kubernetes 1.30 or newer, the chart's own ServiceAccount
 (`serviceAccount.create=true`), an IAM workload binding for exactly that
 ServiceAccount, its namespace and `workloadIdentity.audience`, and
 `installationId`, the installation UUID Core assigned (see

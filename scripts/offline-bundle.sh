@@ -41,7 +41,7 @@ done
 for value in "$package" "$runtime_image" "$key" "$trust" "$minimum_core" "$output"; do
   [ -n "$value" ] || { echo "$usage" >&2; exit 2; }
 done
-for command in docker oras helm jq go shasum; do
+for command in docker oras helm jq go python3 shasum; do
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 1; }
 done
 if [ -e "$output" ]; then
@@ -87,10 +87,7 @@ done
 # chart metadata as JSON; Chart.yaml holds flat scalars only.
 helm package "$root/charts/native-plugin-runtime" --destination "$workspace" >/dev/null
 chart_archive="$(echo "$workspace"/native-plugin-runtime-*.tgz)"
-helm show chart "$chart_archive" | jq -Rn '[inputs | select(length > 0)
-  | if test("^[A-Za-z]+: [^ ].*$") then capture("^(?<key>[A-Za-z]+): (?<value>.*)$")
-    else error("Chart.yaml holds more than flat scalars; extend this conversion") end
-  | {(.key): (.value | if startswith("\"") then fromjson else . end)}] | add' >"$workspace/chart-config.json"
+helm show chart "$chart_archive" | python3 "$root/scripts/chart-config.py" >"$workspace/chart-config.json"
 chart_version="$(jq -er '.version' "$workspace/chart-config.json")"
 created="$(TZ=UTC git -C "$root" log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)"
 (

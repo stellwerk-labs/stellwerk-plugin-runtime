@@ -1,5 +1,20 @@
 # Work log
 
+## Source-correct first-package bootstrap preparation
+
+Keep image and chart source identities and non-release bootstrap tags separate.
+Preserve the existing image provenance when only chart/docs change. Document
+offline Helm-format OCI staging, exact archive/config/layer readbacks and named
+source descriptor checks before the separately approved public copies.
+
+Local Helm packaging/lint, 35 relevant Python tests, strict complete artifact
+scanning and four real ORAS local-layout copies passed. Both named and
+digest-only local copies preserved root media types and complete referenced
+graphs; the runbook uses verified named sources. No registry destination,
+hosted producer, signature or public artifact was qualified by these local tests.
+No runtime application, image-build input, chart template or publisher changed.
+See Decisions and Learnings for the evidence and permission boundaries.
+
 ## Native chart platform minimum and offline metadata
 
 Add the Kubernetes 1.30 chart metadata constraint and an unconditional template

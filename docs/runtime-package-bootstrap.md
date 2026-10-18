@@ -12,14 +12,18 @@ Obtain explicit approval for the public repository/source export and, separately
 the two bootstrap uploads and package-visibility/access changes below. The
 approval must name:
 
-- the exact signed, qualified public source commit and immutable build-artifact
-  ID/digest, with clean-source release metadata and passing content scans;
+- the exact signed, qualified public source commits for the image and chart,
+  recorded separately as `APPROVED_IMAGE_SOURCE_SHA` and
+  `APPROVED_CHART_SOURCE_SHA`, with their immutable build-artifact IDs/digests,
+  clean-source release metadata and passing content scans; a chart-only change
+  must not relabel an unchanged image as built from the newer chart commit;
 - `ghcr.io/stellwerk-labs/stellwerk-plugin-runtime`, its exact qualified two-platform
   image index digest and both platform digests;
 - `ghcr.io/stellwerk-labs/charts/native-plugin-runtime`, the exact qualified Helm
   OCI manifest digest, chart version and SHA-256 of its original `.tgz` payload;
-- a distinct tag `bootstrap-<full-source-SHA>` on each package, public visibility,
-  and release-workflow access for the public runtime repository.
+- the distinct non-release tags `bootstrap-image-<APPROVED_IMAGE_SOURCE_SHA>`
+  and `bootstrap-chart-<APPROVED_CHART_SOURCE_SHA>` on their respective packages,
+  public visibility, and release-workflow access for the public runtime repository.
 
 No stable/RC/latest tag, Git tag, GitHub release, signing operation or package
 deletion is part of bootstrap. Keep the immutable bootstrap tags and receipt.
@@ -44,9 +48,11 @@ cmp "$APPROVED_CHART_ARCHIVE" "$RECEIPTS/chart.tgz"
 ```
 
 If a qualified chart OCI manifest does not yet exist, stage the already-qualified
-archive with normal `helm push` only in that separately authorized private/local
-registry, qualify its manifest/config/layer and record its digest before requesting
-public bootstrap approval. This staging is not a public release. ORAS copying by
+archive either in a local Helm-format OCI layout using the config and media types
+in `scripts/offline-bundle.sh`, or with normal `helm push` in a separately
+authorized private/local registry. Qualify the exact manifest/config/layer,
+archive readback and digest before requesting public bootstrap approval. Local
+layout preparation alone is not hosted release qualification. ORAS copying by
 digest preserves the Helm OCI manifest/config/layer bytes while assigning a
 different registry tag. See the [ORAS copy documentation](https://oras.land/docs/commands/oras_cp/).
 
@@ -62,16 +68,28 @@ existing tag, including one pointing at matching bytes, stops this write stage.
 Only after the specific approval and absence checks, an operator may run:
 
 ```sh
-bootstrap="bootstrap-$APPROVED_SOURCE_SHA"
+image_bootstrap="bootstrap-image-$APPROVED_IMAGE_SOURCE_SHA"
+chart_bootstrap="bootstrap-chart-$APPROVED_CHART_SOURCE_SHA"
 image=ghcr.io/stellwerk-labs/stellwerk-plugin-runtime
 chart=ghcr.io/stellwerk-labs/charts/native-plugin-runtime
 test "$(oras resolve --oci-layout "$IMAGE_LAYOUT:runtime")" = "$APPROVED_IMAGE_DIGEST"
+jq -e --arg digest "$APPROVED_IMAGE_DIGEST" '
+  .manifests | any(.digest == $digest
+    and .mediaType == "application/vnd.oci.image.index.v1+json"
+    and .annotations["org.opencontainers.image.ref.name"] == "runtime")
+' "$IMAGE_LAYOUT/index.json" >/dev/null
+test "$(oras resolve --oci-layout "$CHART_LAYOUT:qualified")" = "$APPROVED_CHART_DIGEST"
+jq -e --arg digest "$APPROVED_CHART_DIGEST" '
+  .manifests | any(.digest == $digest
+    and .mediaType == "application/vnd.oci.image.manifest.v1+json"
+    and .annotations["org.opencontainers.image.ref.name"] == "qualified")
+' "$CHART_LAYOUT/index.json" >/dev/null
 oras cp --no-tty --from-oci-layout \
-  "$IMAGE_LAYOUT@$APPROVED_IMAGE_DIGEST" "$image:$bootstrap"
+  "$IMAGE_LAYOUT:runtime" "$image:$image_bootstrap"
 oras cp --no-tty --from-oci-layout \
-  "$CHART_LAYOUT@$APPROVED_CHART_DIGEST" "$chart:$bootstrap"
-test "$(oras resolve "$image:$bootstrap")" = "$APPROVED_IMAGE_DIGEST"
-test "$(oras resolve "$chart:$bootstrap")" = "$APPROVED_CHART_DIGEST"
+  "$CHART_LAYOUT:qualified" "$chart:$chart_bootstrap"
+test "$(oras resolve "$image:$image_bootstrap")" = "$APPROVED_IMAGE_DIGEST"
+test "$(oras resolve "$chart:$chart_bootstrap")" = "$APPROVED_CHART_DIGEST"
 ```
 
 Configure each package's public visibility and public runtime workflow access

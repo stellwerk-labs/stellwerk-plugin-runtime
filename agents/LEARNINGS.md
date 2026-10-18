@@ -1,5 +1,12 @@
 # Learnings
 
+- A chart-only successor can have different source provenance from a retained
+  image. Freeze distinct payload/source identities and test-only destination
+  tags rather than assigning one source label to both artifacts.
+- Real ORAS local-layout copies can verify descriptor/media-type and blob-graph
+  preservation without starting Docker. They do not prove registry behavior or
+  replace anonymous public-package verification after an approved upload.
+
 - A conditional native-sidecar or preStop guard is not a chart-wide Kubernetes
   minimum. Exercise the metadata boundary and the template independently, with
   the optional feature disabled as well as enabled.

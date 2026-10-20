@@ -1,0 +1,1 @@
+{"name":"native-plugin-runtime","version":"0.1.0-rc.1","description":"Generic isolated runtime for a pre-verified Stellwerk native plugin package","apiVersion":"v2","appVersion":"0.1.0-rc.1","kubeVersion":"\u003e=1.30.0","type":"application"}

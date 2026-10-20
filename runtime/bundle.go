@@ -504,8 +504,18 @@ func (l *bundleLayout) chart(d ociDescriptor, version string) error {
 	if err != nil {
 		return err
 	}
-	var m ociManifest
-	if json.Unmarshal(data, &m) != nil || m.MediaType != ociManifestMediaType || m.Config.MediaType != helmConfigMediaType ||
+	var m struct {
+		SchemaVersion int             `json:"schemaVersion"`
+		MediaType     json.RawMessage `json:"mediaType"`
+		Config        ociDescriptor   `json:"config"`
+		Layers        []ociDescriptor `json:"layers"`
+	}
+	// OCI permits an absent manifest mediaType, as emitted by Helm. A present
+	// value must still be the OCI manifest type; null is not an absent field.
+	var mediaType string
+	if json.Unmarshal(data, &m) != nil ||
+		(m.MediaType != nil && (json.Unmarshal(m.MediaType, &mediaType) != nil || mediaType != ociManifestMediaType)) ||
+		m.SchemaVersion != 2 || d.MediaType != ociManifestMediaType || m.Config.MediaType != helmConfigMediaType ||
 		len(m.Layers) != 1 || m.Layers[0].MediaType != helmChartMediaType {
 		return errors.New("the chart is not a Helm chart OCI artifact")
 	}

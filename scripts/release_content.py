@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic runtime archives and strict inspection of the shipped OCI bytes."""
 
+import base64
+import binascii
 import gzip
 import hashlib
 import io
@@ -191,31 +193,128 @@ def export(layout, digest, output):
         notices(destination / "licenses")
 
 
+SIGSTORE_BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
+
+
+def sigstore_hash_paths(value, inspect):
+    """Identify only canonical SHA-256 inclusion-proof hashes in v0.3 bundles."""
+    if not isinstance(value, dict) or value.get("mediaType") != SIGSTORE_BUNDLE_MEDIA_TYPE:
+        return set()
+
+    def malformed():
+        raise ValueError("private reference scan found prohibited content (bundle-structure/text)")
+
+    material = value.get("verificationMaterial")
+    if not isinstance(material, dict):
+        malformed()
+    entries = material.get("tlogEntries", [])
+    if not isinstance(entries, list):
+        malformed()
+    paths = set()
+    for entry_index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            malformed()
+        if "inclusionProof" not in entry:
+            continue
+        proof = entry["inclusionProof"]
+        if not isinstance(proof, dict) or not isinstance(proof.get("hashes"), list):
+            malformed()
+        for hash_index, encoded in enumerate(proof["hashes"]):
+            if not isinstance(encoded, str):
+                malformed()
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                malformed()
+            if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != encoded:
+                malformed()
+            inspect(decoded, "text", b"\0" not in decoded)
+            paths.add(("verificationMaterial", "tlogEntries", entry_index,
+                       "inclusionProof", "hashes", hash_index))
+    return paths
+
+
+def json_scan_projection(data, inspect):
+    """Preserve raw JSON except eligible hash tokens, and inspect decoded strings."""
+    if b"\0" in data:
+        return data
+    stripped = data.lstrip()
+    if not stripped.startswith((b"{", b"[", b'"', b"\xef\xbb\xbf")):
+        return data
+    try:
+        value = strict_json(data)
+    except (json.JSONDecodeError, UnicodeError):
+        # JSON fragments also occur in ordinary source files. A fragment claiming
+        # the recognized bundle type must not gain an exemption from bad syntax.
+        if not stripped.removeprefix(b"\xef\xbb\xbf").lstrip().startswith((b"{", b"[")):
+            return data
+        for token in re.finditer(rb'"(?:[^"\\]|\\.)*"', data):
+            try:
+                recognized = json.loads(token.group()) == SIGSTORE_BUNDLE_MEDIA_TYPE
+            except (ValueError, UnicodeError):
+                continue
+            if recognized:
+                raise ValueError("private reference scan found prohibited content (bundle-structure/text)")
+        return data
+    except ValueError:
+        raise ValueError("private reference scan found prohibited content (json-structure/text)") from None
+    eligible = sigstore_hash_paths(value, inspect)
+
+    def strings(node, path=()):
+        if isinstance(node, dict):
+            for key, item in node.items():
+                yield path + (key,), True, key
+                yield from strings(item, path + (key,))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                yield from strings(item, path + (index,))
+        elif isinstance(node, str):
+            yield path, False, node
+
+    tokens = iter(re.finditer(rb'"(?:[^"\\]|\\.)*"', data))
+    pieces, start = [], 0
+    for path, is_key, text in strings(value):
+        token = next(tokens)
+        if not is_key and path in eligible:
+            pieces.extend((data[start:token.start()], b'""'))
+            start = token.end()
+        else:
+            decoded = text.encode("utf-8", errors="surrogatepass")
+            inspect(decoded, "text")
+    pieces.append(data[start:])
+    return b"".join(pieces)
+
+
 def scan(directory, forbidden=()):
     directory = Path(directory)
     common_patterns = [
-        rb"/(?:Users|home)/[A-Za-z0-9_.-]+/",
-        rb"github\.com/[^\s\"'<>]+-enterprise\b",
-        rb"\bhttps?://[a-z0-9.-]+\.(?:internal|localdomain)\b",
-    ] + [re.escape(value.encode()) for value in forbidden if value]
-    text_patterns = [rb"\bWX[0-9]+\b", rb"\b(?:S1\.[0-9]+|PM[0-9]{2}|MO[0-9]{2}|[QCD][0-9]{2})\b"]
+        ("private-path", rb"/(?:Users|home)/[A-Za-z0-9_.-]+/"),
+        ("private-owner", rb"github\.com/[^\s\"'<>]+-enterprise\b"),
+        ("private-url", rb"\bhttps?://[a-z0-9.-]+\.(?:internal|localdomain)\b"),
+    ] + [("configured-literal", re.escape(value.encode())) for value in forbidden if value]
+    text_patterns = [("planning-identifier", rb"\bWX[0-9]+\b"),
+                     ("planning-identifier", rb"\b(?:S1\.[0-9]+|PM[0-9]{2}|MO[0-9]{2}|[QCD][0-9]{2})\b")]
+
+    def inspect(data, location, include_text=True):
+        for family, pattern in common_patterns + (text_patterns if include_text else []):
+            if re.search(pattern, data):
+                # Only fixed categories leave this boundary, never values/paths.
+                raise ValueError(f"private reference scan found prohibited content ({family}/{location})")
+
     for path in directory.rglob("*"):
         if path.name == ".gitleaksignore":
             raise ValueError("shipping content cannot supply scanner exemptions")
         if path.is_symlink():
             raise ValueError("refusing symlinked scan content")
-        if any(re.search(pattern, path.relative_to(directory).as_posix().encode())
-               for pattern in common_patterns + text_patterns):
-            raise ValueError("private reference scan found prohibited content")
+        inspect(path.relative_to(directory).as_posix().encode(), "path")
         if path.is_file():
             data = path.read_bytes()
             # Three-character planning identifiers collide with ELF machine
             # instructions. Apply them to text; binary content still gets the
             # complete secret scan and all concrete path/owner/URL patterns.
-            patterns = common_patterns + ([] if b"\0" in data else text_patterns)
-            if any(re.search(pattern, data) for pattern in patterns):
-                # Do not print the match or path: either can itself hold a secret.
-                raise ValueError("private reference scan found prohibited content")
+            inspect(data, "text", False)
+            projection = json_scan_projection(data, inspect)
+            inspect(projection, "text", b"\0" not in data)
 
 
 def binary_strings(directory):

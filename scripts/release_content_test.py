@@ -1,3 +1,5 @@
+import base64
+import copy
 import gzip
 import hashlib
 import io
@@ -5,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import string
 import subprocess
@@ -232,6 +235,223 @@ class ReleaseContentTest(unittest.TestCase):
                     release.scan(seed, ["private-owner-seed"])
         (seed / "binary").write_bytes(b"public content")
         release.scan(seed)
+
+    def sigstore_bundle(self, hashes):
+        return {"mediaType": release.SIGSTORE_BUNDLE_MEDIA_TYPE,
+                "verificationMaterial": {"tlogEntries": [
+                    {"inclusionProof": {"hashes": hashes}}]}}
+
+    def collision_hash(self):
+        tail = base64.b64encode(random.Random(41).randbytes(28)).decode()
+        encoded = "+" + "C" + "01/" + tail[:37] + "A="
+        decoded = base64.b64decode(encoded, validate=True)
+        self.assertEqual(len(decoded), 32)
+        self.assertEqual(base64.b64encode(decoded).decode(), encoded)
+        return encoded
+
+    def test_sigstore_hash_collision_is_scoped_to_exact_media_type_and_path(self):
+        seed = self.root / "bundles"
+        seed.mkdir()
+        path = seed / "bundle.json"
+        encoded = self.collision_hash()
+        bundle = self.sigstore_bundle([encoded])
+        original = json.dumps(bundle, indent=2).encode()
+        path.write_bytes(original)
+        release.scan(seed)
+        self.assertEqual(path.read_bytes(), original)
+        for media_type in ("application/vnd.dev.sigstore.bundle.v0.2+json",
+                           release.SIGSTORE_BUNDLE_MEDIA_TYPE + "; charset=utf-8", "other"):
+            with self.subTest(media_type=media_type):
+                changed = copy.deepcopy(bundle)
+                changed["mediaType"] = media_type
+                path.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, "prohibited content.*planning-identifier/text"):
+                    release.scan(seed)
+        for location in ("root", "proof", "certificate", "nested"):
+            with self.subTest(location=location):
+                changed = copy.deepcopy(bundle)
+                if location == "root":
+                    changed["extra"] = encoded
+                elif location == "proof":
+                    changed["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["extra"] = encoded
+                elif location == "certificate":
+                    changed["verificationMaterial"]["certificate"] = {"rawBytes": encoded}
+                else:
+                    changed["extra"] = bundle
+                path.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, "prohibited content"):
+                    release.scan(seed)
+        path.write_bytes(original)
+        with self.assertRaisesRegex(ValueError, "prohibited content.*configured-literal/text"):
+            release.scan(seed, ["C" + "01"])
+
+    def test_original_public_sigstore_bundle_preserves_and_accepts_collision(self):
+        source = Path(__file__).parent / "testdata/release/sigstore-inclusion-proof.json"
+        fixture = source.read_bytes()
+        self.assertEqual(hashlib.sha256(fixture).hexdigest(),
+                         "66ec8fc8fc771950acf65c075ea571a65da891de4283e7387687311c65bec86f")
+        self.assertTrue(fixture.endswith(b"\n"))
+        original = fixture[:-1]
+        self.assertEqual(len(original), 20526)
+        self.assertEqual(hashlib.sha256(original).hexdigest(),
+                         "f5b6af02e20f4c66aa2c9ccffde9a407487babb6ce8c3833576f506d78c65447")
+        bundle = json.loads(original)
+        hashes = [encoded for entry in bundle["verificationMaterial"]["tlogEntries"]
+                  for encoded in entry["inclusionProof"]["hashes"]]
+        old_pattern = rb"\b(?:S1\.[0-9]+|PM[0-9]{2}|MO[0-9]{2}|[QCD][0-9]{2})\b"
+        self.assertTrue(any(re.search(old_pattern, encoded.encode()) for encoded in hashes))
+        seed = self.root / "original-bundle"
+        seed.mkdir()
+        path = seed / "bundle.json"
+        path.write_bytes(original)
+        release.scan(seed)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_sigstore_decoded_hashes_keep_existing_content_policy(self):
+        seed = self.root / "decoded-hashes"
+        seed.mkdir()
+        path = seed / "bundle.json"
+        values = [b"C" + b"01 ", b"/" + b"home/engineer/private/",
+                  b"https://fixture." + b"internal/", b"private-owner-fixture"]
+        for decoded in values:
+            with self.subTest(kind=decoded[:1]):
+                encoded = base64.b64encode(decoded.ljust(32, b"x")).decode()
+                path.write_text(json.dumps(self.sigstore_bundle([encoded])))
+                with self.assertRaisesRegex(ValueError, "prohibited content") as caught:
+                    release.scan(seed, ["private-owner-fixture"])
+                self.assertNotIn(decoded.decode(), str(caught.exception))
+                self.assertNotIn(encoded, str(caught.exception))
+        for decoded in (b"\0" + b"C" + b"01 ", b"\0/" + b"home/engineer/private/"):
+            encoded = base64.b64encode(decoded.ljust(32, b"x")).decode()
+            path.write_text(json.dumps(self.sigstore_bundle([encoded])))
+            if b"home" in decoded:
+                with self.assertRaisesRegex(ValueError, "prohibited content.*private-path/text"):
+                    release.scan(seed)
+            else:
+                release.scan(seed)
+
+    def test_sigstore_malformed_hashes_and_container_types_fail_closed(self):
+        seed = self.root / "malformed-bundles"
+        seed.mkdir()
+        path = seed / "bundle.json"
+        canonical = base64.b64encode(bytes(range(32))).decode()
+        noncanonical = canonical[:-2] + "9="
+        self.assertEqual(base64.b64decode(noncanonical), base64.b64decode(canonical))
+        for encoded in (None, 1, {}, [], "not-base64", canonical + "\n", canonical.rstrip("="),
+                        noncanonical, base64.b64encode(b"x" * 31).decode(),
+                        base64.b64encode(b"x" * 33).decode()):
+            with self.subTest(hash_type=type(encoded).__name__):
+                path.write_text(json.dumps(self.sigstore_bundle([encoded])))
+                with self.assertRaisesRegex(ValueError, "prohibited content.*bundle-structure/text"):
+                    release.scan(seed)
+        for material in (None, [], {"tlogEntries": None}, {"tlogEntries": {}},
+                         {"tlogEntries": [None]}, {"tlogEntries": [{"inclusionProof": None}]},
+                         {"tlogEntries": [{"inclusionProof": []}]},
+                         {"tlogEntries": [{"inclusionProof": {}}]},
+                         {"tlogEntries": [{"inclusionProof": {"hashes": "text"}}]}):
+            with self.subTest(material_type=type(material).__name__):
+                path.write_text(json.dumps({"mediaType": release.SIGSTORE_BUNDLE_MEDIA_TYPE,
+                                            "verificationMaterial": material}))
+                with self.assertRaisesRegex(ValueError, "prohibited content.*bundle-structure/text"):
+                    release.scan(seed)
+        path.write_text(json.dumps({"mediaType": release.SIGSTORE_BUNDLE_MEDIA_TYPE}))
+        with self.assertRaisesRegex(ValueError, "prohibited content.*bundle-structure/text"):
+            release.scan(seed)
+        path.write_text('{"mediaType":' + json.dumps(release.SIGSTORE_BUNDLE_MEDIA_TYPE) + ',')
+        with self.assertRaisesRegex(ValueError, "prohibited content.*bundle-structure/text"):
+            release.scan(seed)
+
+    def test_sigstore_without_inclusion_hashes_keeps_strict_scanning(self):
+        seed = self.root / "no-proof"
+        seed.mkdir()
+        path = seed / "bundle.json"
+        for material in ({}, {"tlogEntries": []}, {"tlogEntries": [{}]},
+                         {"tlogEntries": [{"inclusionProof": {"hashes": []}}]}):
+            with self.subTest(material=material):
+                bundle = {"mediaType": release.SIGSTORE_BUNDLE_MEDIA_TYPE,
+                          "verificationMaterial": material,
+                          "messageSignature": {"messageDigest": {"algorithm": "SHA2_256",
+                                                "digest": base64.b64encode(b"x" * 32).decode()}}}
+                path.write_text(json.dumps(bundle))
+                release.scan(seed)
+                bundle["extra"] = self.collision_hash()
+                path.write_text(json.dumps(bundle))
+                with self.assertRaisesRegex(ValueError, "prohibited content"):
+                    release.scan(seed)
+
+    def test_json_duplicate_keys_and_escaped_private_references_are_rejected(self):
+        seed = self.root / "json-controls"
+        seed.mkdir()
+        path = seed / "metadata.json"
+        for raw in (b'{"audit":"public","audit":"also public"}',
+                    b'{"nested":{"audit":"public","aud\\u0069t":"also public"}}'):
+            path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, "prohibited content.*json-structure/text"):
+                release.scan(seed)
+        encoded = self.collision_hash()
+        bundle = json.dumps(self.sigstore_bundle([encoded])).encode()
+        path.write_bytes(bundle[:-1] + b',"verificationMaterial":{}}')
+        with self.assertRaisesRegex(ValueError, "prohibited content.*json-structure/text"):
+            release.scan(seed)
+        for raw in (b'{"note":"private-owner-fixtur\\u0065"}',
+                    b'{"private-owner-fixtur\\u0065":"public"}',
+                    b'"private-owner-fixtur\\u0065"',
+                    b'\xef\xbb\xbf{"note":"private-owner-fixtur\\u0065"}',
+                    b'{"note":"\\u0043' + b'01"}',
+                    b'{"note":"\\u0000\\u0043' + b'01"}',
+                    b'{"\\u0000\\u0043' + b'01":"public"}',
+                    b'{"note":"\\/home\\/engineer\\/private"}'):
+            path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, "prohibited content"):
+                release.scan(seed, ["private-owner-fixture"])
+        # A source fragment is not a malformed bundle or a JSON object.
+        path.write_text('{"public": shell_variable}\n')
+        release.scan(seed)
+
+    def test_binary_like_json_openers_keep_existing_scan_policy(self):
+        seed = self.root / "binary-openers"
+        seed.mkdir()
+        path = seed / "content"
+        script = Path(__file__).with_name("scan-release-content.sh")
+        for data, rejected in ((b"{\xff\0public", False), (b"[\xff\0public", False),
+                               (b'{"note":"\xff"}', False),
+                               (b"{\xff\0C" + b"01", False),
+                               (b"{\xff C" + b"01", True),
+                               (b"{\xff\0/" + b"home/engineer/private/", True)):
+            with self.subTest(binary=b"\0" in data, rejected=rejected):
+                path.write_bytes(data)
+                if rejected:
+                    with self.assertRaisesRegex(ValueError, "prohibited content"):
+                        release.scan(seed)
+                else:
+                    release.scan(seed)
+                result = subprocess.run([str(script), str(seed)], capture_output=True,
+                                        text=True, timeout=30)
+                if rejected:
+                    self.assertNotEqual(result.returncode, 0)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+        path.write_bytes(b'{"mediaType":' + json.dumps(release.SIGSTORE_BUNDLE_MEDIA_TYPE).encode()
+                         + b',"note":"\xff"}')
+        with self.assertRaisesRegex(ValueError, "prohibited content.*bundle-structure/text"):
+            release.scan(seed)
+
+    def test_scan_diagnostics_only_report_fixed_category_and_location(self):
+        seed = self.root / "diagnostics"
+        seed.mkdir()
+        forbidden = "private-owner-fixture"
+        path = seed / "public"
+        path.write_text(forbidden)
+        with self.assertRaisesRegex(ValueError, "configured-literal/text") as caught:
+            release.scan(seed, [forbidden])
+        self.assertNotIn(forbidden, str(caught.exception))
+        self.assertNotIn(str(path), str(caught.exception))
+        path.unlink()
+        (seed / forbidden).write_text("public")
+        with self.assertRaisesRegex(ValueError, "configured-literal/path") as caught:
+            release.scan(seed, [forbidden])
+        self.assertNotIn(forbidden, str(caught.exception))
+        self.assertNotIn(str(seed), str(caught.exception))
 
     def test_private_reference_in_shipping_path_is_refused(self):
         forbidden = "private-owner-fixture"

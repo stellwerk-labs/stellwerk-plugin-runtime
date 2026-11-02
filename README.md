@@ -27,6 +27,8 @@ A package is an OCI Image Specification 1.1 artifact with artifact type
 | `application/vnd.stellwerk.plugin.manifest.v1+json` | `plugin-manifest.json` | strict plugin manifest |
 | `application/vnd.stellwerk.plugin.executable.v1` | `bin/linux/<arch>/plugin` | static Linux executable per platform |
 | `application/vnd.stellwerk.plugin.ui.asset.v1` | `ui/...` | optional UI manifest and assets |
+| `application/vnd.stellwerk.plugin.metadata.v1` | `registration-manifest.json` | optional registration metadata |
+| `application/vnd.stellwerk.plugin.license.v1` | `LICENSE`, `licenses/...` | optional package license and dependency notices |
 
 The plugin manifest (`schemaVersion` 1, `runtimeProfile` `native-static-v1`,
 `protocolVersion` 1) names the plugin ID, canonical SemVer version, one
@@ -38,10 +40,30 @@ digest.
 
 Every layer must carry its title, a unique clean path from the table above,
 within fixed size limits (plugin manifest 256 KiB, executables 256 MiB, UI
-files 64 MiB, at most 2001 UI layers and about 577 MiB in total).
+files 64 MiB and at most 2001 UI layers). Registration metadata is limited to
+one file of 256 KiB. Legal notices are limited independently to 1 MiB per file,
+16 MiB in total and 512 files, including the root `LICENSE`. The complete
+package is limited to 592.75 MiB. Parent/file path conflicts, control characters,
+backslashes and `%`, `?`, `#` or `:` in titles are rejected.
 Archive layers, such as an ORAS directory push, are refused: a package
 contains plain files only. ORAS checks each pulled blob against its
 descriptor, so these declared limits bound what a pull can write.
+
+Packages carrying registration metadata or legal layers require runtime
+**0.1.1 or later**. Runtime 0.1.0 rejects these media types before pulling any
+package content. Upgrade the operator-pinned runtime image (and use the 0.1.1
+chart release) before installing such a package. Packages using only the
+original manifest, executable and UI layer types remain supported. These
+additive layer types do not change the plugin protocol or manifest schema.
+
+Push each registration or legal file explicitly with its media type. Passing
+the `licenses/` directory to ORAS creates an archive, which is refused. Keep
+legal files at their original package paths; UI assets are served only from
+the UI manifest and legal layers are never made UI assets. The publisher's
+signature and attestations bind the exact OCI envelope, including every
+metadata and legal descriptor. Both ORAS pulls and offline bundle verification
+check every layer's SHA-256 and exact size. The runtime authenticates metadata
+as opaque content; it does not grant capabilities from it.
 
 ```sh
 output="$(mktemp -d)"
@@ -503,7 +525,7 @@ network whose only peer is the registry.
 ## Building the runtime image
 
 The image is `FROM scratch` with one static binary, license and patent notices
-under `/licenses`, and runs as UID 65532. Builds use Go 1.26.2.
+under `/licenses`, and runs as UID 65532. Builds use Go 1.26.10.
 
 ```sh
 ./scripts/install-release-tools.sh /tmp/runtime-release-tools

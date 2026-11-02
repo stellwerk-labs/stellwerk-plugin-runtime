@@ -66,7 +66,7 @@ field() { jq -er "$1" "$bundle/bundle.json"; }
 blob() { echo "$1/oci/blobs/sha256/${2#sha256:}"; }
 test "$(field .images.runtime.digest)" = "$runtime_digest"
 test "$(field .package.digest)" = "$(jq -er .packageDigest "$workspace/package/release.json")"
-test "$(field .minimumCoreVersion)/$(field .minimumChartVersion)/$(field .chart.version)" = 1.0.0/0.1.0/0.1.0
+test "$(field .minimumCoreVersion)/$(field .minimumChartVersion)/$(field .chart.version)" = 1.0.0/0.1.1/0.1.1
 # The licence travels separately; the bundle holds exactly these entries.
 test "$(cd "$bundle" && find . -maxdepth 1 ! -name . | sort | tr '\n' ' ')" = \
   "./bundle.json ./bundle.sigstore.json ./oci ./publishers.json "

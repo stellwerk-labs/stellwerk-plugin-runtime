@@ -28,7 +28,7 @@ for arch in amd64 arm64; do
     sbom="$output/runtime-$kind-linux-$arch.spdx.json"
     jq -e '.spdxVersion == "SPDX-2.3" and .SPDXID == "SPDXRef-DOCUMENT" and
       any(.packages[]; .name == "golang.org/x/sys") and
-      any(.packages[]; .name == "stdlib" and .versionInfo == "go1.26.2")' "$sbom" >/dev/null
+      any(.packages[]; .name == "stdlib" and .versionInfo == "go1.26.10")' "$sbom" >/dev/null
     # Syft creates a random document UUID and wall-clock timestamp. Bind the
     # document namespace and creation time to the immutable source/image.
     jq --arg created "$created" --arg namespace "https://stellwerk.dev/sbom/runtime/${digest#sha256:}/$kind/linux/$arch" \

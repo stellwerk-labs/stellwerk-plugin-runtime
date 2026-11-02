@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/elliptic"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,10 @@ type bundleFixture struct {
 }
 
 func newBundleFixture(t *testing.T) *bundleFixture {
+	return newBundleFixtureWithFiles(t, nil)
+}
+
+func newBundleFixtureWithFiles(t *testing.T, files map[string][]byte) *bundleFixture {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, bundleLayoutDir, "blobs", "sha256"), 0755); err != nil {
@@ -46,6 +51,17 @@ func newBundleFixture(t *testing.T) *bundleFixture {
 	layers := []ociDescriptor{f.titled(manifestMediaType, plugin, "plugin-manifest.json")}
 	for _, architecture := range []string{"amd64", "arm64"} {
 		layers = append(layers, f.titled(executableMediaType, []byte("plugin "+architecture), "bin/linux/"+architecture+"/plugin"))
+	}
+	// Sort titles so a payload produces deterministic envelope bytes.
+	for _, title := range slices.Sorted(maps.Keys(files)) {
+		mediaType := licenseMediaType
+		if title == "registration-manifest.json" {
+			mediaType = metadataMediaType
+		}
+		if strings.HasPrefix(title, "ui/") {
+			mediaType = uiAssetMediaType
+		}
+		layers = append(layers, f.titled(mediaType, files[title], title))
 	}
 	f.pkgData = bundleJSON(t, map[string]any{"schemaVersion": 2, "mediaType": ociManifestMediaType,
 		"artifactType": packageArtifactType, "config": f.empty, "layers": layers})

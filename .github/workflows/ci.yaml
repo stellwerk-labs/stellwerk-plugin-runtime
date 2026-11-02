@@ -65,7 +65,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.2'
+          go-version: '1.26.10'
           cache: false
 
       - name: Setup Helm
@@ -127,6 +127,9 @@ jobs:
           chmod +x "$bin/kind" "$bin/kubectl"
           echo "$bin" >> "$GITHUB_PATH"
 
+      - name: Check known Go vulnerabilities
+        run: sh scripts/check-go-security.sh
+
       - name: Check gofmt, race tests, vet, chart and package contracts
         run: ./scripts/check.sh
 
@@ -139,7 +142,7 @@ jobs:
         env:
           RELEASE_FORBIDDEN_LITERAL: ${{ secrets.RUNTIME_FORBIDDEN_LITERAL || (github.event.repository.private && github.repository_owner || '') }}
         run: |
-          ./scripts/build-runtime-release.sh 0.1.0 "$RUNNER_TEMP/runtime-release"
+          ./scripts/build-runtime-release.sh 0.1.1 "$RUNNER_TEMP/runtime-release"
           ./scripts/generate-runtime-sbom.sh "$RUNNER_TEMP/runtime-release"
           ./scripts/scan-release-content.sh "$RUNNER_TEMP/runtime-release" "$RELEASE_FORBIDDEN_LITERAL"
 

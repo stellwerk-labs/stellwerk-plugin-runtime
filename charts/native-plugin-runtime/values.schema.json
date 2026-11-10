@@ -78,8 +78,10 @@
     "package": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reference", "manifestSHA256", "installedDigest", "attestations", "plainHTTP", "registryConfigSecret"],
+      "required": ["transport", "reference", "manifestSHA256", "installedDigest", "attestations", "plainHTTP", "registryConfigSecret"],
       "properties": {
+        "transport": {"enum": ["oci", "https"]},
+        "https": {"type": "object", "additionalProperties": false, "required": ["url", "archiveSHA256", "digest", "signatureDigest"], "properties": {"url": {"type": "string"}, "archiveSHA256": {"type": "string"}, "digest": {"type": "string"}, "signatureDigest": {"type": "string"}, "redirectHosts": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"}}}},
         "reference": {"type": "string"},
         "installedDigest": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"},
         "attestations": {
@@ -357,14 +359,12 @@
           },
           "package": {
             "properties": {
-              "reference": {"pattern": "@sha256:[0-9a-f]{64}$"},
               "manifestSHA256": {"pattern": "^[0-9a-f]{64}$"}
             }
           },
           "images": {
             "properties": {
-              "runtime": {"pattern": "@sha256:[0-9a-f]{64}$"},
-              "oras": {"pattern": "@sha256:[0-9a-f]{64}$"}
+              "runtime": {"pattern": "@sha256:[0-9a-f]{64}$"}
             }
           },
           "trust": {"properties": {"mode": {"enum": ["development-untrusted", "managed-key-no-tlog"]}}}
@@ -377,8 +377,7 @@
         "properties": {
           "images": {"properties": {"cosign": {"pattern": "@sha256:[0-9a-f]{64}$"}}},
           "trust": {"properties": {
-            "bootstrapSecret": {"properties": {"name": {"minLength": 1}}},
-            "signatureBundleSecret": {"properties": {"name": {"minLength": 1}}}
+            "bootstrapSecret": {"properties": {"name": {"minLength": 1}}}
           }}
         }
       }
@@ -399,6 +398,9 @@
           }
         }
       }
-    }
+    },
+    {"if": {"properties": {"enabled": {"const": true}, "package": {"properties": {"transport": {"const": "oci"}}}}}, "then": {"properties": {"package": {"properties": {"reference": {"pattern": "@sha256:[0-9a-f]{64}$"}, "https": {"properties": {"url": {"maxLength": 0}, "archiveSHA256": {"maxLength": 0}, "digest": {"maxLength": 0}, "signatureDigest": {"maxLength": 0}, "redirectHosts": {"maxItems": 0}}}}}, "images": {"properties": {"oras": {"pattern": "@sha256:[0-9a-f]{64}$"}}}}}},
+    {"if": {"properties": {"trust": {"properties": {"mode": {"const": "managed-key-no-tlog"}}}, "package": {"properties": {"transport": {"const": "oci"}}}}}, "then": {"properties": {"trust": {"properties": {"signatureBundleSecret": {"properties": {"name": {"minLength": 1}}}}}}}},
+    {"if": {"properties": {"enabled": {"const": true}, "package": {"properties": {"transport": {"const": "https"}}}}}, "then": {"properties": {"trust": {"properties": {"mode": {"const": "managed-key-no-tlog"}, "signatureBundleSecret": {"properties": {"name": {"maxLength": 0}}}}}, "package": {"properties": {"reference": {"maxLength": 0}, "plainHTTP": {"const": false}, "registryConfigSecret": {"properties": {"name": {"minLength": 1}}}, "registryCASecret": {"properties": {"name": {"minLength": 1}}}, "https": {"properties": {"url": {"pattern": "^https://[^/?#@]+/[^?#]*$"}, "archiveSHA256": {"pattern": "^[0-9a-f]{64}$"}, "digest": {"pattern": "^sha256:[0-9a-f]{64}$"}, "signatureDigest": {"pattern": "^sha256:[0-9a-f]{64}$"}}}}}}}}
   ]
 }

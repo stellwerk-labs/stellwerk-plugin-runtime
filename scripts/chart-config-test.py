@@ -27,8 +27,8 @@ class ChartConfigTests(unittest.TestCase):
                 ["helm", "package", str(CHART), "--destination", directory],
                 capture_output=True, text=True, timeout=20, check=True,
             )
-            self.assertIn("native-plugin-runtime-0.1.1.tgz", packaged.stdout)
-            archive = Path(directory) / "native-plugin-runtime-0.1.1.tgz"
+            self.assertIn("native-plugin-runtime-0.1.2.tgz", packaged.stdout)
+            archive = Path(directory) / "native-plugin-runtime-0.1.2.tgz"
             shown = subprocess.run(
                 ["helm", "show", "chart", str(archive)],
                 capture_output=True, text=True, timeout=20, check=True,
@@ -40,8 +40,8 @@ class ChartConfigTests(unittest.TestCase):
                 "name": "native-plugin-runtime",
                 "description": "Generic isolated runtime for a pre-verified Stellwerk native plugin package",
                 "type": "application",
-                "version": "0.1.1",
-                "appVersion": "0.1.1",
+                "version": "0.1.2",
+                "appVersion": "0.1.2",
                 "kubeVersion": ">=1.30.0",
             })
 

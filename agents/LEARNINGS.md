@@ -22,3 +22,19 @@
 
 References: [ORAS remote options](https://github.com/oras-project/oras/blob/v1.3.4/cmd/oras/internal/option/remote.go),
 [Secret key validation](https://github.com/kubernetes/apimachinery/blob/v0.35.0/pkg/util/validation/validation.go).
+
+## HTTPS delivery
+
+- Generic Package downloads can return a signed object-store redirect even when
+  initial Basic authentication succeeded. Refusing every redirect breaks this
+  normal route. An exact host allowlist and one header-free hop retain scoped
+  GitLab credentials without introducing another registry or trust protocol.
+- The runtime image is scratch, and the release image is also assembled directly
+  as a deterministic OCI layer. A Dockerfile-only CA copy would leave the actual
+  release image different. Require independent public CA roots in the chart.
+- Archive plus extracted closure coexist before verification completes. Derive
+  temporary capacity from both copies: the 604.75 MiB archive cap needs more
+  than 1200 MiB, so the HTTPS temporary emptyDir cap is 1280 MiB.
+- A real publisher-produced tar and real TLS server caught archive compatibility
+  separately from synthetic unit fixtures. Keep exact source/hash scope in the
+  qualification receipt; local transport proof is not registry publication.

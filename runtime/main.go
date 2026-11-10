@@ -1,5 +1,5 @@
 // The native-static-v1 launcher is a deliberately small execution adapter.
-// Artifact transport and signature verification happen before this process.
+// Artifact transport and signature verification precede plugin execution.
 package main
 
 import (
@@ -422,9 +422,11 @@ func parseInputs(command string, args []string) (inputs, error) {
 
 func execute(args []string) error {
 	if len(args) == 0 {
-		return errors.New("expected verify-envelope, verify-publisher, verify-bundle, validate, run, serve-ui, refresh-core-token or check-core-token")
+		return errors.New("expected fetch-https, verify-envelope, verify-publisher, verify-bundle, validate, run, serve-ui, refresh-core-token or check-core-token")
 	}
 	switch args[0] {
+	case "fetch-https":
+		return fetchHTTPS(args[1:])
 	case "verify-envelope":
 		return verifyEnvelope(args[1:])
 	case "refresh-core-token":

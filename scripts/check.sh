@@ -26,6 +26,7 @@ python3 "$root/scripts/chart-kubernetes-version-test.py"
 python3 "$root/scripts/chart-config-test.py"
 python3 "$root/scripts/chart-host-aliases-test.py"
 python3 "$root/scripts/registry-ca-test.py"
+python3 "$root/scripts/https-package-test.py"
 
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/native-plugin-check.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT

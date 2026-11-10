@@ -28,7 +28,7 @@ spec:
       labels:
         {{- include "native-plugin-runtime.migrationSelectorLabels" . | nindent 8 }}
       annotations:
-        stellwerk.dev/plugin-package: {{ .Values.package.reference | quote }}
+        stellwerk.dev/plugin-package: {{ include "native-plugin-runtime.packageDigest" . | quote }}
         stellwerk.dev/plugin-trust-mode: {{ .Values.trust.mode | quote }}
     spec:
       serviceAccountName: {{ include "native-plugin-runtime.migrationServiceAccountName" . }}
@@ -101,7 +101,7 @@ spec:
             sizeLimit: {{ .Values.stateVolume.sizeLimit }}
         - name: temporary
           emptyDir:
-            sizeLimit: 16Mi
+            sizeLimit: {{ if eq .Values.package.transport "https" }}1280Mi{{ else }}16Mi{{ end }}
         - name: migration-profile
           secret:
             secretName: {{ $profileSecret }}

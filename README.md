@@ -81,6 +81,7 @@ uncommitted changes, and the Go version.
 | Command | Purpose |
 |---|---|
 | `verify-publisher` | Apply the operator's trust bootstrap: accept bundles without transparency-log inclusion only for a publisher pinned with `managed-key-no-tlog`, verify the package signature and the SBOM and provenance attestations offline as one release set and write each part's pinned key for Cosign (`--key-dir`). |
+| `fetch-https` | Download an approved HTTPS plugin-only OCI archive by hash, verify its unchanged signed graph and materialize package/evidence files for the normal init gates. See [HTTPS delivery](docs/https-delivery.md). |
 | `verify-bundle` | Verify an offline bundle completely offline against the operator-pinned trust bootstrap digest and, with `--registry` and `--out`, write the import plan and chart values (see Offline bundle). |
 | `verify-envelope` | Before any content is pulled, bind the fetched OCI manifest to the pinned package digest and the operator-approved plugin manifest hash, and admit only the layers of the package format. |
 | `validate` | Verify the plugin manifest, selected executable and UI assets against their digests and write a read-only validation receipt. |
@@ -136,9 +137,12 @@ installation UUID and package digest Core recorded for it:
 
 Package trust and entitlement trust are separate decisions.
 
-In both modes each Pod's fetch init containers first fetch the OCI manifest
-by digest and check it with `verify-envelope`; package content is pulled
-only afterwards.
+With the default OCI transport, each Pod's fetch init containers first fetch
+the OCI manifest by digest and check it with `verify-envelope`; package content
+is pulled only afterwards. The optional [HTTPS transport](docs/https-delivery.md)
+downloads the unchanged signed graph in one archive and requires
+`managed-key-no-tlog`. Both routes keep publisher, independent Cosign and package
+validation gates before migration or launch.
 
 - `managed-key-no-tlog`: the trust policy for private commercial packages,
   which are signed with a managed key and never uploaded to a public

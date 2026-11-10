@@ -391,7 +391,7 @@ func (l *bundleLayout) referrer(d, subject ociDescriptor, predicateType string) 
 // bundle.json and verifies the signature and attestation referrers as one
 // release set under the operator's trust bootstrap, exactly as the chart's
 // publisher gate does. It returns the package signature bundle.
-func (l *bundleLayout) verifyPackage(m bundleManifest, listed map[string]ociDescriptor, bootstrap trustBootstrap, now time.Time) ([]byte, error) {
+func (l *bundleLayout) verifyPackage(m bundleManifest, listed map[string]ociDescriptor, bootstrap trustBootstrap, now time.Time, installedDigest string) ([]byte, error) {
 	descriptor := listed[m.Package.Digest]
 	data, err := l.read(descriptor, ociMetadataLimit)
 	if err != nil {
@@ -441,7 +441,7 @@ func (l *bundleLayout) verifyPackage(m bundleManifest, listed map[string]ociDesc
 		}
 		parts[part.name] = bundle
 	}
-	if _, err := verifyRelease(bootstrap, m.PluginID, parts["signature"], parts["SBOM"], parts["provenance"], data, now, ""); err != nil {
+	if _, err := verifyRelease(bootstrap, m.PluginID, parts["signature"], parts["SBOM"], parts["provenance"], data, now, installedDigest); err != nil {
 		return nil, fmt.Errorf("package release set: %w", err)
 	}
 	return parts["signature"], nil
@@ -602,7 +602,7 @@ func loadBundle(dir, trustDigest string, now time.Time) (verifiedBundle, error) 
 	if err != nil {
 		return verifiedBundle{}, err
 	}
-	packageSignature, err := layout.verifyPackage(manifest, listed, bootstrap, now)
+	packageSignature, err := layout.verifyPackage(manifest, listed, bootstrap, now, "")
 	if err != nil {
 		return verifiedBundle{}, err
 	}

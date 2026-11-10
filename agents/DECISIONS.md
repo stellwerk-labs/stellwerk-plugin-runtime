@@ -24,3 +24,19 @@
   transfer use the same TLS policy; runtime and migration share that chain.
 - Leave publisher verification, application code, image production and release
   authority unchanged. Secret updates apply at the next Pod start.
+
+## HTTPS package transport
+
+- Add an explicit `package.transport=https` path alongside default `oci`. Ship
+  one plain tar containing only the existing package/referrer OCI closure. Pin
+  the transport hash from an independently approved release record, and keep the
+  inner envelope, publisher, evidence and independent Cosign gates unchanged.
+- Reuse single-host dockerconfigjson Basic credentials and public CA Secrets in
+  the fetch init container. Require the CA Secret for the chart's scratch image;
+  operator CLI use can retain host system roots. Publisher trust stays separate.
+- Permit one HTTPS object-store redirect only to an exact operator allowlist.
+  Clear all original headers, including authorization and referer, even on a
+  same-host redirect. No proxy, cookie jar, wildcard host or additional hop.
+- Bound archive and extraction by existing complete-package limits, reject
+  non-closure files and links, and stage only in an owned temporary directory.
+  Keep the original OCI install chain and installed-digest policy compatible.

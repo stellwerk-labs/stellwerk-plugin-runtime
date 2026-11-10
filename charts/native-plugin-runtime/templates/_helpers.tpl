@@ -71,8 +71,18 @@ containers, never the plugin, UI or token containers. */}}
 {{- fail "package.registryCASecret cannot be combined with package.plainHTTP" }}
 {{- end }}
 {{- $managedKey := eq .Values.trust.mode "managed-key-no-tlog" }}
+{{- $https := eq .Values.package.transport "https" }}
+{{- if not (has .Values.package.transport (list "oci" "https")) }}
+{{- fail "package.transport must be oci or https" }}
+{{- end }}
+{{- if and $https (or (not $managedKey) .Values.package.plainHTTP .Values.package.reference) }}
+{{- fail "HTTPS packages require managed-key-no-tlog, HTTPS and no OCI reference" }}
+{{- end }}
 {{- $attestations := .Values.package.attestations }}
 {{- $predicateTypes := dict "sbom" "https://spdx.dev/Document" "provenance" "https://stellwerk.dev/attestation/source-provenance/v1" }}
+{{- if $https }}
+{{- include "native-plugin-runtime.fetchHTTPS" . }}
+{{- else }}
 - name: fetch-package-envelope
   image: {{ required "images.oras is required" .Values.images.oras | quote }}
   imagePullPolicy: {{ .Values.images.pullPolicy }}
@@ -134,7 +144,9 @@ containers, never the plugin, UI or token containers. */}}
     - name: package
       mountPath: /package
       readOnly: true
+{{- end }}
 {{- if $managedKey }}
+{{- if not $https }}
 {{- range $name := list "sbom" "provenance" }}
 {{- with index $attestations $name }}
 # Signed attestation referrer of the package, pulled by its own digest.
@@ -183,6 +195,7 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /tmp
 {{- end }}
 {{- end }}
+{{- end }}
 # Policy gate: the operator's trust bootstrap must pin this plugin's
 # publisher with managed-key-no-tlog. Verifies the signature and the SBOM
 # and provenance attestations as one release set; a required attestation
@@ -224,7 +237,7 @@ containers, never the plugin, UI or token containers. */}}
       mountPath: /signature/oci-manifest.sigstore.json
       subPath: oci-manifest.sigstore.json
       readOnly: true
-    - name: attestations
+    - name: {{ if $https }}signature-bundle{{ else }}attestations{{ end }}
       mountPath: /attestations
       readOnly: true
     - name: verify
@@ -286,7 +299,7 @@ containers, never the plugin, UI or token containers. */}}
     - name: verify
       mountPath: /verify
       readOnly: true
-    - name: attestations
+    - name: {{ if $https }}signature-bundle{{ else }}attestations{{ end }}
       mountPath: /attestations
       readOnly: true
     - name: temporary
@@ -294,6 +307,7 @@ containers, never the plugin, UI or token containers. */}}
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if not $https }}
 - name: pull-package
   image: {{ .Values.images.oras | quote }}
   imagePullPolicy: {{ .Values.images.pullPolicy }}
@@ -336,6 +350,7 @@ containers, never the plugin, UI or token containers. */}}
     {{- end }}
     - name: temporary
       mountPath: /tmp
+{{- end }}
 - name: validate-package
   image: {{ .Values.images.runtime | quote }}
   imagePullPolicy: {{ .Values.images.pullPolicy }}
@@ -369,10 +384,12 @@ start (rollout restart). */}}
   emptyDir:
     medium: Memory
     sizeLimit: 1Mi
+{{- if ne .Values.package.transport "https" }}
 - name: attestations
   emptyDir:
     medium: Memory
     sizeLimit: 3Mi
+{{- end }}
 - name: trust
   secret:
     secretName: {{ required "trust.bootstrapSecret.name is required" .Values.trust.bootstrapSecret.name }}
@@ -381,12 +398,18 @@ start (rollout restart). */}}
       - key: {{ .Values.trust.bootstrapSecret.key }}
         path: publishers.json
 - name: signature-bundle
+  {{- if eq .Values.package.transport "https" }}
+  emptyDir:
+    medium: Memory
+    sizeLimit: 4Mi
+  {{- else }}
   secret:
     secretName: {{ required "trust.signatureBundleSecret.name is required" .Values.trust.signatureBundleSecret.name }}
     defaultMode: 0440
     items:
       - key: {{ .Values.trust.signatureBundleSecret.key }}
         path: oci-manifest.sigstore.json
+  {{- end }}
 {{- end }}
 {{- if .Values.package.registryConfigSecret.name }}
 - name: registry-config
@@ -430,4 +453,74 @@ too; it holds no registry credentials. */}}
     - protocol: TCP
       port: {{ .port }}
 {{- end }}
+{{- end -}}
+
+{{- define "native-plugin-runtime.packageDigest" -}}
+{{- if eq .Values.package.transport "https" -}}
+{{- .Values.package.https.digest -}}
+{{- else -}}
+{{- .Values.package.reference -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "native-plugin-runtime.fetchHTTPS" -}}
+{{- $_ := required "HTTPS packages require package.registryCASecret.name for the scratch runtime TLS roots" .Values.package.registryCASecret.name }}
+- name: fetch-https-package
+  image: {{ required "images.runtime is required" .Values.images.runtime | quote }}
+  imagePullPolicy: {{ .Values.images.pullPolicy }}
+  args:
+    - fetch-https
+    - --url={{ .Values.package.https.url }}
+    - --archive-sha256={{ .Values.package.https.archiveSHA256 }}
+    - --package-digest={{ .Values.package.https.digest }}
+    - --signature-digest={{ .Values.package.https.signatureDigest }}
+    {{- if .Values.package.https.redirectHosts }}
+    - --redirect-hosts={{ join "," .Values.package.https.redirectHosts }}
+    {{- end }}
+    - --manifest-sha256={{ .Values.package.manifestSHA256 }}
+    - --plugin-id={{ .Values.plugin.id }}
+    - --plugin-version={{ .Values.plugin.version }}
+    - --package-dir=/package
+    - --evidence-dir=/evidence
+    - --trust-bootstrap=/trust/publishers.json
+    - --credentials=/registry/config.json
+    {{- if .Values.package.registryCASecret.name }}
+    - --ca-file=/registry/ca.crt
+    {{- end }}
+    {{- with .Values.package.installedDigest }}
+    - --installed-digest={{ . }}
+    {{- end }}
+    {{- range $name := list "sbom" "provenance" }}
+    {{- with index $.Values.package.attestations $name }}
+    - --{{ $name }}-digest={{ . }}
+    {{- end }}
+    {{- end }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    {{- toYaml .Values.initResources | nindent 4 }}
+  volumeMounts:
+    - name: package
+      mountPath: /package
+    - name: signature-bundle
+      mountPath: /evidence
+    - name: trust
+      mountPath: /trust/publishers.json
+      subPath: publishers.json
+      readOnly: true
+    - name: registry-config
+      mountPath: /registry/config.json
+      subPath: config.json
+      readOnly: true
+    {{- if .Values.package.registryCASecret.name }}
+    - name: registry-ca
+      mountPath: /registry/ca.crt
+      subPath: ca.crt
+      readOnly: true
+    {{- end }}
+    - name: temporary
+      mountPath: /tmp
 {{- end -}}

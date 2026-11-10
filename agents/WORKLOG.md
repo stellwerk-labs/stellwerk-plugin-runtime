@@ -55,3 +55,31 @@ remain separate qualification, not a claim of this chart-only test run.
 Application/build inputs are unchanged, but release archives and chart content
 change. Runtime builds embed the source revision and use its commit time; old
 images are not evidence for a new revision.
+
+## HTTPS package transport (local preparation)
+
+Added a standard-library HTTPS fetch command, strict bounded plugin-only tar
+handling and reuse of the existing OCI graph/publisher verifier. Added an
+explicit HTTPS Helm path shared by runtime and migration, preserving publisher,
+independent Cosign and package validation gates. Reader credentials and public
+CA roots reach only fetch init; original OCI remains the default. Documented the
+operator inputs and new storage requirements in `docs/https-delivery.md`. See
+[decisions](DECISIONS.md) and [learnings](LEARNINGS.md).
+
+Local validation includes real TLS Basic/redirect and tamper/closure/policy
+negatives, old bundle regressions, Go race tests and vet, actual Helm rendering,
+release content contracts, and sealed Linux arm64 plus emulated amd64 transport
+and bundle tests. An actual publisher-generated public fixture was downloaded
+through TLS and accepted using its separate original bootstrap and release pins.
+No production publication or cluster installation is established by these tests.
+The existing ORAS TLS regression fixture requires pinned ORAS 1.3.4; the host's
+1.3.6 fails that guard. Its Helm-only tests pass; do not call the ORAS portion
+qualified without the required binary. Full image/cluster qualification remains
+separate. The macOS test harness needs modern Bash for its empty-array expansion.
+
+Prepared the 0.1.2 release source metadata and notes locally: chart version and
+appVersion, CI build version, and the chart/offline-bundle expectations now agree.
+Historical 0.1.1 layer compatibility and third-party disposition documents stay
+historical. There is no separate embedded runtime SemVer constant; the release
+builder's approved version controls native archive names, Helm packaging and
+release.json. Release notes are review input, not publication authorization.

@@ -75,6 +75,15 @@ migration:
     key: ca.crt
 
 package:
+  # Explicit transport. HTTPS retains the unchanged signed OCI graph in plugin.tar.
+  transport: oci
+  https:
+    url: ""
+    archiveSHA256: ""
+    digest: ""
+    signatureDigest: ""
+    # Exact object-store hosts for one credential-free HTTPS redirect, if needed.
+    redirectHosts: []
   # OCI registry reference. Enabled installations require an @sha256 digest.
   reference: ""
   manifestSHA256: ""
@@ -92,12 +101,14 @@ package:
     sbom: ""
     provenance: ""
   # Optional dockerconfigjson Secret for the registry (usually the customer's
-  # mirror). Mounted only into the ORAS fetch init containers.
+  # mirror). HTTPS requires exactly one auths entry for the URL host, containing
+  # only base64(username:deploy-token) in auth. Fetch init containers only.
   registryConfigSecret:
     name: ""
     key: .dockerconfigjson
   # Optional public TLS CA for the registry/mirror, not a client key or the
-  # publisher/Core/database trust bundle. ORAS fetch init containers only.
+  # publisher/Core/database trust bundle. Fetch init containers only.
+  # HTTPS in the scratch runtime image requires this independent public CA file.
   # Cannot be combined with plainHTTP. Updates apply on the next Pod start.
   registryCASecret:
     name: ""

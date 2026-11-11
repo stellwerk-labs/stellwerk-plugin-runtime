@@ -40,3 +40,14 @@
 - Bound archive and extraction by existing complete-package limits, reject
   non-closure files and links, and stage only in an owned temporary directory.
   Keep the original OCI install chain and installed-digest policy compatible.
+
+## Runtime 0.1.3
+
+- Publish the zero-replica chart validation correction as a coordinated 0.1.3
+  successor, retaining normal native image/archive/chart production and all
+  existing release gates. Do not relabel or overwrite 0.1.2 artifacts.
+- Keep historical compatibility minima and release-specific security records
+  scoped to their original versions. Only current version consumers advance.
+- The normal security gate rejects Go 1.26.10 for GO-2026-6859. Advance CI,
+  release tooling and SPDX compiler checks together to Go 1.26.11; retain the
+  existing security gate and unchanged application dependencies.

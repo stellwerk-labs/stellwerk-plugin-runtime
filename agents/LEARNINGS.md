@@ -38,3 +38,12 @@ References: [ORAS remote options](https://github.com/oras-project/oras/blob/v1.3
 - A real publisher-produced tar and real TLS server caught archive compatibility
   separately from synthetic unit fixtures. Keep exact source/hash scope in the
   qualification receipt; local transport proof is not registry publication.
+
+## Zero-replica release preparation
+
+- Chart version and appVersion also feed the normal CI release build, real Helm
+  metadata fixture and offline bundle minimum/version expectations. Advance
+  those consumers together; retain older minimum-runtime documentation.
+- Keep private log creation separate from the test process umask. Existing
+  package fixtures verify exact 0444 modes, so inheriting restrictive 077 changes
+  their expected filesystem state. Use normal 022 for tests with private logs.

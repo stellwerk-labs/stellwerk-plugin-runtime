@@ -83,3 +83,25 @@ Historical 0.1.1 layer compatibility and third-party disposition documents stay
 historical. There is no separate embedded runtime SemVer constant; the release
 builder's approved version controls native archive names, Helm packaging and
 release.json. Release notes are review input, not publication authorization.
+
+## Runtime 0.1.3 preparation
+
+Prepared 0.1.3 source metadata, chart/appVersion, current CI build version, real
+Helm metadata and offline bundle expectations, plus release notes for explicit
+zero replicas. The runtime application implementation and dependencies are unchanged.
+Public main and the peeled 0.1.2 tag share the same base as the zero-replica fix;
+0.1.3 publication remains separate from this local preparation. See Decisions
+and Learnings for version-consumer and immutable-artifact boundaries.
+
+The original Go 1.26.10 security check found GO-2026-6859, fixed in 1.26.11.
+Updated both workflow compiler versions, release compiler and SPDX expectation
+to 1.26.11 before expensive qualification. The original failure remains retained
+in the external release evidence. No product dependency or security gate changed.
+
+The full local check reached its normal success footer after host race/vet,
+both-architecture vet, sealed Linux execution, TLS, Helm and package checks.
+A daemon restart lost the outer exit receipt; the exact completed log and honest
+recovery receipt are retained outside the repository. No full check was replayed.
+Current compiler-selection readback confirms Go 1.26.11 through the Go launcher.
+The unchanged hosted release workflow must still qualify both native Linux
+architectures, complete installation paths and original release artifacts.

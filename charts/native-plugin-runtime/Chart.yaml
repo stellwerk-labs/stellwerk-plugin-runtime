@@ -2,6 +2,6 @@ apiVersion: v2
 name: native-plugin-runtime
 description: Generic isolated runtime for a pre-verified Stellwerk native plugin package
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.1.3
+appVersion: "0.1.3"
 kubeVersion: ">=1.30.0"

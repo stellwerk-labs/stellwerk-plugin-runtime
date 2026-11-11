@@ -231,6 +231,10 @@ render_phase "$fixture/phase-incompatible.yaml" "${migration_args[@]}" --set rep
 render_phase "$fixture/phase-affinity.yaml" "${runtime_args[@]}" --set replicaCount=2 \
   --set-json 'affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"pool","operator":"In","values":["plugins"]}]}]}}}'
 render_phase "$fixture/phase-persistent.yaml" "${migration_args[@]}" --set persistence.enabled=true
+render_phase "$fixture/phase-zero-runtime.yaml" "${runtime_args[@]}" --set replicaCount=0
+render_phase "$fixture/phase-zero-expand.yaml" "${migration_args[@]}" --set replicaCount=0
+render_phase "$fixture/phase-zero-incompatible.yaml" "${migration_args[@]}" --set replicaCount=0 \
+  --set-string migration.compatibility=incompatible
 python3 - "$fixture" <<'PY'
 import re
 import sys
@@ -295,12 +299,23 @@ for rendered in (expand, incompatible):
         assert key in rendered, (key, list(rendered))
     assert "app.kubernetes.io/component: runtime" not in rendered[f"Job/{name}-migration"]
 
+for variant, paused in [("phase-zero-runtime", False), ("phase-zero-expand", True), ("phase-zero-incompatible", True)]:
+    rendered = documents(variant)
+    deployment = rendered[f"Deployment/{name}"]
+    head = spec(deployment)
+    assert f"  paused: {str(paused).lower()}\n  replicas: 0\n" in head, (variant, head)
+    assert "    type: Recreate\n" in head and "rollingUpdate" not in head, (variant, head)
+    assert "affinity:" not in deployment, variant
+    assert not any(key.startswith("PodDisruptionBudget/") for key in rendered), variant
+    assert (f"Job/{name}-migration" in rendered) == paused, variant
+    assert f"Service/{name}" in rendered and f"ServiceAccount/{name}" in rendered, variant
+
 # A migration phase keeps the single replica's state claim.
 persistent = documents("phase-persistent")
 assert f"PersistentVolumeClaim/{name}-state" in persistent, list(persistent)
 assert f"claimName: {name}-state" in persistent[f"Deployment/{name}"]
 PY
-for invalid in "--set=replicaCount=0" "--set=replicaCount=2,persistence.enabled=true" \
+for invalid in "--set=replicaCount=-1" "--set=replicaCount=2,persistence.enabled=true" \
   "--set-string=migration.compatibility=breaking" "--set=runtime.enabled=false"; do
   if helm template native-probe charts/native-plugin-runtime "${runtime_args[@]}" "$invalid" >/dev/null 2>&1; then
     echo "chart accepted replica or phase setting $invalid" >&2

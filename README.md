@@ -330,7 +330,13 @@ operator lists the registry mirror endpoints (see Package fetch).
 
 ### Replicas
 
-`replicaCount` (default 1) sets the runtime replicas. One replica is replaced
+`replicaCount` (default 1) sets the runtime replicas. Set it to `0` to stop all
+runtime Pods, including while a migration Job runs. Zero replicas provide no
+runtime or UI availability; the Service and workload identity remain configured,
+and the migration Job still runs when enabled. Restore the intended replica
+count to serve requests again. Negative replica counts are rejected.
+
+One replica is replaced
 with `Recreate`. Several replicas roll one at a time (`RollingUpdate`,
 `maxUnavailable: 0`, `maxSurge: 1`), so at least the configured number stays
 available during a package upgrade. A PodDisruptionBudget (`minAvailable: 1`,
@@ -340,7 +346,8 @@ preferred anti-affinity on `kubernetes.io/hostname` spreads them; an explicit
 chart elects no writer: the plugin's fenced database lease admits exactly one,
 and every supported plugin binary takes it (`v1alpha` supports fresh
 installations only). Replicas keep no local state, so `persistence.enabled`
-requires `replicaCount: 1`.
+requires `replicaCount: 1` while serving; it may remain enabled with zero replicas
+to retain the state claim while the runtime is stopped.
 
 A terminating replica keeps serving for `preStopDelaySeconds` (default 5, a
 preStop sleep on the plugin and UI containers) before it receives `SIGTERM`:

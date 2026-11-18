@@ -42,7 +42,7 @@ class ChartConfigTests(unittest.TestCase):
                 "type": "application",
                 "version": "0.1.3",
                 "appVersion": "0.1.3",
-                "kubeVersion": ">=1.30.0",
+                "kubeVersion": ">=1.30.0-0",
             })
 
     def test_helm_single_quote_escaping(self):

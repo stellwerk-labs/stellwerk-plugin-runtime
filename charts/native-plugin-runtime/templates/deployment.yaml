@@ -1,4 +1,4 @@
-{{- if semverCompare "<1.30.0" .Capabilities.KubeVersion.Version }}
+{{- if semverCompare "<1.30.0-0" .Capabilities.KubeVersion.Version }}
 {{- fail "native-plugin-runtime requires Kubernetes 1.30 or newer" }}
 {{- end }}
 {{- if .Values.enabled }}

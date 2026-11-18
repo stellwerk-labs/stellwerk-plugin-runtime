@@ -35,12 +35,13 @@ class KubernetesVersionTests(unittest.TestCase):
             ["helm", "show", "chart", str(CHART)],
             capture_output=True, text=True, timeout=20, check=True,
         )
-        self.assertIn("kubeVersion: '>=1.30.0'", metadata.stdout)
-        for args in ((), ("--set=preStopDelaySeconds=0",)):
-            with self.subTest(args=args):
-                denied = render(CHART, "1.29.0", *args)
-                self.assertNotEqual(denied.returncode, 0)
-                self.assertIn("kubeVersion", denied.stderr)
+        self.assertIn("kubeVersion: '>=1.30.0-0'", metadata.stdout)
+        for version in ("1.29.0", "1.29.9-eks-577a51e"):
+            for args in ((), ("--set=preStopDelaySeconds=0",)):
+                with self.subTest(version=version, args=args):
+                    denied = render(CHART, version, *args)
+                    self.assertNotEqual(denied.returncode, 0)
+                    self.assertIn("kubeVersion", denied.stderr)
 
     def test_template_guard_refuses_129_without_metadata(self):
         with tempfile.TemporaryDirectory(prefix="runtime-chart-floor-") as directory:
@@ -48,24 +49,38 @@ class KubernetesVersionTests(unittest.TestCase):
             shutil.copytree(CHART, chart)
             metadata = chart / "Chart.yaml"
             metadata.write_text(
-                metadata.read_text(encoding="utf-8").replace('kubeVersion: ">=1.30.0"\n', ""),
+                metadata.read_text(encoding="utf-8").replace('kubeVersion: ">=1.30.0-0"\n', ""),
+                encoding="utf-8",
+            )
+            self.assertNotIn("kubeVersion:", metadata.read_text(encoding="utf-8"))
+            for version in ("1.29.0", "1.29.9-eks-577a51e"):
+                for args in ((), ("--set=preStopDelaySeconds=0",)):
+                    with self.subTest(version=version, args=args):
+                        denied = render(chart, version, *args)
+                        self.assertNotEqual(denied.returncode, 0)
+                        self.assertIn("native-plugin-runtime requires Kubernetes 1.30 or newer", denied.stderr)
+
+    def test_supported_vendor_versions_render_identical_pod_specs(self):
+        with tempfile.TemporaryDirectory(prefix="runtime-chart-vendor-") as directory:
+            chart = Path(directory) / "native-plugin-runtime"
+            shutil.copytree(CHART, chart)
+            # Exercise the advertised range with Helm's SemVer comparison.
+            (chart / "templates/constraint-probe.yaml").write_text(
+                '{{- if not (semverCompare .Chart.KubeVersion .Capabilities.KubeVersion.Version) }}'
+                '{{ fail "advertised Kubernetes constraint rejects this version" }}{{ end }}',
                 encoding="utf-8",
             )
             for args in ((), ("--set=preStopDelaySeconds=0",)):
                 with self.subTest(args=args):
-                    denied = render(chart, "1.29.0", *args)
-                    self.assertNotEqual(denied.returncode, 0)
-                    self.assertIn("native-plugin-runtime requires Kubernetes 1.30 or newer", denied.stderr)
-
-    def test_130_and_135_render_identical_pod_specs(self):
-        for args in ((), ("--set=preStopDelaySeconds=0",)):
-            with self.subTest(args=args):
-                minimum = render(CHART, "1.30.0", *args)
-                later = render(CHART, "1.35.0", *args)
-                self.assertEqual(minimum.returncode, 0, minimum.stderr)
-                self.assertEqual(later.returncode, 0, later.stderr)
-                self.assertIn("kind: Deployment", minimum.stdout)
-                self.assertEqual(minimum.stdout, later.stdout)
+                    minimum = render(chart, "1.30.0", *args)
+                    self.assertEqual(minimum.returncode, 0, minimum.stderr)
+                    self.assertIn("kind: Deployment", minimum.stdout)
+                    for version in ("1.30.0-eks-123abc", "1.35.0", "1.35.9-eks-577a51e",
+                                    "1.35.0-gke.123", "1.35.0+k3s1"):
+                        with self.subTest(version=version):
+                            later = render(chart, version, *args)
+                            self.assertEqual(later.returncode, 0, later.stderr)
+                            self.assertEqual(minimum.stdout, later.stdout)
 
 
 if __name__ == "__main__":

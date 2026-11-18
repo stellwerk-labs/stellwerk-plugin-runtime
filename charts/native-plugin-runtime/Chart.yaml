@@ -4,4 +4,4 @@ description: Generic isolated runtime for a pre-verified Stellwerk native plugin
 type: application
 version: 0.1.3
 appVersion: "0.1.3"
-kubeVersion: ">=1.30.0"
+kubeVersion: ">=1.30.0-0"
